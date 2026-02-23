@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-from ..config import StructAlignRAGConfig
+from ..config import StructAlignLiteConfig
 from ..utils.genericness_utils import build_title_token_idf, title_avg_idf, title_genericness_score
 from ..utils.logging_utils import get_logger
 from ..utils.text_utils import clean_wiki_text, normalize_entity
@@ -56,7 +56,7 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
 
 
 class OfflineIndexer:
-    def __init__(self, config: StructAlignRAGConfig, meta_dir: str) -> None:
+    def __init__(self, config: StructAlignLiteConfig, meta_dir: str) -> None:
         self.config = config
         self.meta_dir = meta_dir
         os.makedirs(self.meta_dir, exist_ok=True)
@@ -137,17 +137,17 @@ class OfflineIndexer:
 
     def build_or_load(self, corpus: List[Dict[str, Any]], embedder, llm) -> Dict[str, Any]:
         if (not self.config.force_index_from_scratch) and self._index_ready():
-            logger.info(f"[StructAlignRAG] offline index exists, loading | meta={self.index_meta_path}")
+            logger.info(f"[StructAlignLiteRAG] offline index exists, loading | meta={self.index_meta_path}")
             with open(self.index_meta_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         elif (not self.config.force_index_from_scratch) and os.path.exists(self.index_meta_path):
             logger.warning(
-                f"[StructAlignRAG] offline index meta exists but artifacts are missing/legacy, rebuilding | meta={self.index_meta_path}"
+                f"[StructAlignLiteRAG] offline index meta exists but artifacts are missing/legacy, rebuilding | meta={self.index_meta_path}"
             )
 
         t0 = time.time()
         step_times: Dict[str, float] = {}
-        logger.info(f"[StructAlignRAG] [Step 0] offline indexing start | docs={len(corpus)}")
+        logger.info(f"[StructAlignLiteRAG] [Step 0] offline indexing start | docs={len(corpus)}")
 
         # 0) docs + passages
         ts = time.time()
@@ -155,11 +155,11 @@ class OfflineIndexer:
         _write_jsonl(self.docs_path, docs)
         _write_jsonl(self.passages_path, passages)
         step_times["split_docs_passages_s"] = round(time.time() - ts, 4)
-        logger.info(f"[StructAlignRAG] [OFFLINE_SPLIT] docs/passages ready | docs={len(docs)} passages={len(passages)}")
+        logger.info(f"[StructAlignLiteRAG] [OFFLINE_SPLIT] docs/passages ready | docs={len(docs)} passages={len(passages)}")
 
         # 1) doc embeddings (for doc-level dense fill, optional but cheap)
         doc_texts_for_emb = [f"{d['title']}\n{clean_wiki_text(d.get('text',''))}" for d in docs]
-        logger.info(f"[StructAlignRAG] [Step 0c] embedding docs ... | docs={len(docs)}")
+        logger.info(f"[StructAlignLiteRAG] [Step 0c] embedding docs ... | docs={len(docs)}")
         ts = time.time()
         doc_emb = embedder.encode(doc_texts_for_emb)
         np.save(self.doc_emb_path, doc_emb)
@@ -167,7 +167,7 @@ class OfflineIndexer:
 
         # 2) passage embeddings + FAISS
         passage_texts_for_emb = [f"{p['title']}\n{p['text']}" for p in passages]
-        logger.info(f"[StructAlignRAG] [Step 0c] embedding passages ... | passages={len(passages)}")
+        logger.info(f"[StructAlignLiteRAG] [Step 0c] embedding passages ... | passages={len(passages)}")
         ts = time.time()
         passage_emb = embedder.encode(passage_texts_for_emb)
         np.save(self.passage_emb_path, passage_emb)
@@ -175,14 +175,14 @@ class OfflineIndexer:
         save_faiss_index(p_index, self.faiss_passages_path)
         save_id_map([p["passage_id"] for p in passages], self.faiss_passage_ids_path)
         step_times["embed_passages_s"] = round(time.time() - ts, 4)
-        logger.info(f"[StructAlignRAG] [OFFLINE_INDEX] passage FAISS ready | path={self.faiss_passages_path}")
+        logger.info(f"[StructAlignLiteRAG] [OFFLINE_INDEX] passage FAISS ready | path={self.faiss_passages_path}")
 
         # 3) capsule extraction (LLM, cached) per passage
-        logger.info(f"[StructAlignRAG] [Step 0a] extracting capsules ... | mode={self.config.capsule_mode}")
+        logger.info(f"[StructAlignLiteRAG] [Step 0a] extracting capsules ... | mode={self.config.capsule_mode}")
         ts = time.time()
         raw_capsules, cap_stats = batch_extract_capsules(passages, llm=llm, config=self.config)
         step_times["extract_capsules_s"] = round(time.time() - ts, 4)
-        logger.info(f"[StructAlignRAG] [OFFLINE_CAPSULE_EXTRACT] done | {cap_stats}")
+        logger.info(f"[StructAlignLiteRAG] [OFFLINE_CAPSULE_EXTRACT] done | {cap_stats}")
 
         # Deterministic capsule ordering (thread completion order is non-deterministic).
         def _cap_key(cap: Dict[str, Any]):
@@ -233,7 +233,7 @@ class OfflineIndexer:
             )
 
         # 4) entity canonicalization + attach entity_ids to capsule arguments
-        logger.info(f"[StructAlignRAG] [OFFLINE_ENTITY] canonicalizing entities ...")
+        logger.info(f"[StructAlignLiteRAG] [OFFLINE_ENTITY] canonicalizing entities ...")
         ts = time.time()
         doc_titles = [d["title"] for d in docs]
         entities, surface_to_eid = canonicalize_entities(capsules, doc_titles, self.config)
@@ -260,10 +260,10 @@ class OfflineIndexer:
 
         _write_jsonl(self.entities_path, entities)
         step_times["canonicalize_entities_s"] = round(time.time() - ts, 4)
-        logger.info(f"[StructAlignRAG] [OFFLINE_ENTITY] entities ready | entities={len(entities)}")
+        logger.info(f"[StructAlignLiteRAG] [OFFLINE_ENTITY] entities ready | entities={len(entities)}")
 
         # 5) embed capsules (raw) on canonical_text (or fallback to quote)
-        logger.info(f"[StructAlignRAG] [Step 0c] embedding capsules ... | capsules={len(capsules)}")
+        logger.info(f"[StructAlignLiteRAG] [Step 0c] embedding capsules ... | capsules={len(capsules)}")
         ts = time.time()
         cap_texts = []
         for c in capsules:
@@ -277,7 +277,7 @@ class OfflineIndexer:
         step_times["embed_capsules_s"] = round(time.time() - ts, 4)
 
         # 6) capsule canonicalization
-        logger.info(f"[StructAlignRAG] [OFFLINE_CANONICALIZE] canonicalizing capsules ...")
+        logger.info(f"[StructAlignLiteRAG] [OFFLINE_CANONICALIZE] canonicalizing capsules ...")
         ts = time.time()
         canonical_capsules, cap2can, canonical_emb, canonical_ids = canonicalize_capsules(capsules, cap_emb, self.config)
         np.save(self.canonical_capsule_emb_path, canonical_emb)
@@ -291,14 +291,14 @@ class OfflineIndexer:
         _write_jsonl(self.canonical_capsules_path, canonical_capsules)
         _write_jsonl(self.cap2can_path, [{"capsule_id": k, "canonical_id": v} for k, v in cap2can.items()])
         logger.info(
-            f"[StructAlignRAG] [OFFLINE_CANONICALIZE] canonical capsules ready | raw={len(capsules)} canonical={len(canonical_capsules)}"
+            f"[StructAlignLiteRAG] [OFFLINE_CANONICALIZE] canonical capsules ready | raw={len(capsules)} canonical={len(canonical_capsules)}"
         )
 
         # 7) capsule FAISS on canonical capsules
         c_index = build_ip_index(canonical_emb)
         save_faiss_index(c_index, self.faiss_capsules_path)
         save_id_map(canonical_ids, self.faiss_capsule_ids_path)
-        logger.info(f"[StructAlignRAG] [OFFLINE_INDEX] capsule FAISS ready | path={self.faiss_capsules_path}")
+        logger.info(f"[StructAlignLiteRAG] [OFFLINE_INDEX] capsule FAISS ready | path={self.faiss_capsules_path}")
 
         # 7.5) structural indices for fast online access
         ts = time.time()
@@ -307,7 +307,7 @@ class OfflineIndexer:
         step_times["build_struct_index_s"] = round(time.time() - ts, 4)
 
         # 8) evidence graph with typed edges (+ sim edges)
-        logger.info(f"[StructAlignRAG] [Step 0b] building evidential graph ...")
+        logger.info(f"[StructAlignLiteRAG] [Step 0b] building evidential graph ...")
         ts = time.time()
         gmeta = build_evidence_graph(
             config=self.config,
@@ -363,7 +363,7 @@ class OfflineIndexer:
         with open(self.index_meta_path, "w", encoding="utf-8") as f:
             json.dump(index_meta, f, ensure_ascii=False, indent=2)
 
-        logger.info(f"[StructAlignRAG] [Step 0] offline indexing done | meta={self.index_meta_path} total_elapsed={time.time()-t0:.2f}s")
+        logger.info(f"[StructAlignLiteRAG] [Step 0] offline indexing done | meta={self.index_meta_path} total_elapsed={time.time()-t0:.2f}s")
         return index_meta
 
     def load_index(self) -> Dict[str, Any]:

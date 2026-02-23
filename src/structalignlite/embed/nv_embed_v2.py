@@ -43,13 +43,13 @@ class NVEmbedV2Embedder:
         # NV-Embed-v2 remote-code model is not guaranteed to be thread-safe for concurrent `.encode()` calls.
         self._encode_lock = threading.Lock()
 
-        logger.info(f"[StructAlignRAG] loading embedding model | name={self.model_name}")
+        logger.info(f"[StructAlignLiteRAG] loading embedding model | name={self.model_name}")
         try:
             # Used by passage splitting/token budgeting during offline indexing.
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
         except Exception as e:
             logger.warning(
-                f"[StructAlignRAG] failed to load tokenizer for NV-Embed-v2; falling back to bert-base-uncased | "
+                f"[StructAlignLiteRAG] failed to load tokenizer for NV-Embed-v2; falling back to bert-base-uncased | "
                 f"model={self.model_name} err={type(e).__name__}: {e}"
             )
             self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")

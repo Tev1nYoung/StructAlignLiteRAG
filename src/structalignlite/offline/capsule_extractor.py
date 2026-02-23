@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 
 from tqdm import tqdm
 
-from ..config import StructAlignRAGConfig
+from ..config import StructAlignLiteConfig
 from ..utils.logging_utils import get_logger
 from ..utils.text_utils import split_sentences
 
@@ -42,7 +42,7 @@ def _sent_spans_in_passage(passage_text: str, sents: List[str]) -> List[Tuple[in
     return spans
 
 
-def _fallback_sentence_capsules(passage: Dict[str, Any], config: StructAlignRAGConfig) -> List[Dict[str, Any]]:
+def _fallback_sentence_capsules(passage: Dict[str, Any], config: StructAlignLiteConfig) -> List[Dict[str, Any]]:
     sents = split_sentences(passage.get("text", ""))
     spans = _sent_spans_in_passage(passage.get("text", ""), sents)
 
@@ -79,7 +79,7 @@ def _fallback_sentence_capsules(passage: Dict[str, Any], config: StructAlignRAGC
 def extract_capsules_for_passage(
     passage: Dict[str, Any],
     llm,
-    config: StructAlignRAGConfig,
+    config: StructAlignLiteConfig,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Returns (capsules, stats) where capsules are WITHOUT capsule_id/canonical_id.
@@ -202,7 +202,7 @@ def extract_capsules_for_passage(
         return out, {"llm_ok": 1, "fallback": 0, "cache_hit": bool(meta.get("cache_hit"))}
     except Exception as e:
         logger.warning(
-            f"[StructAlignRAG] [OFFLINE_CAPSULE_EXTRACT] passage fallback | pid={passage.get('passage_id')} err={type(e).__name__}: {e}"
+            f"[StructAlignLiteRAG] [OFFLINE_CAPSULE_EXTRACT] passage fallback | pid={passage.get('passage_id')} err={type(e).__name__}: {e}"
         )
         return _fallback_sentence_capsules(passage, config), {"llm_ok": 0, "fallback": 1, "error": str(e)}
 
@@ -210,7 +210,7 @@ def extract_capsules_for_passage(
 def batch_extract_capsules(
     passages: List[Dict[str, Any]],
     llm,
-    config: StructAlignRAGConfig,
+    config: StructAlignLiteConfig,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Returns (capsules, stats). Each capsule row is WITHOUT capsule_id/canonical_id.

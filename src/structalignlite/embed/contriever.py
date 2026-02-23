@@ -37,7 +37,7 @@ class ContrieverEmbedder:
         # We allow higher-level pipeline parallelism (LLM I/O, multi-query) while serializing GPU encoder calls.
         self._encode_lock = threading.Lock()
 
-        logger.info(f"[StructAlignRAG] loading embedding model | name={self.model_name}")
+        logger.info(f"[StructAlignLiteRAG] loading embedding model | name={self.model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
         torch_dtype = dtype if dtype in ("float16", "float32", "bfloat16") else "auto"
@@ -61,7 +61,7 @@ class ContrieverEmbedder:
         self.max_supported_len = max_supported
         if self.max_supported_len and self.max_length > self.max_supported_len:
             logger.warning(
-                f"[StructAlignRAG] embedding_max_seq_len too large for encoder, will cap | "
+                f"[StructAlignLiteRAG] embedding_max_seq_len too large for encoder, will cap | "
                 f"configured={self.max_length} cap={self.max_supported_len} model={self.model_name}"
             )
 

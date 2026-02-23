@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, Dict, Iterable, List, Sequence, Set, Tuple
 
-from ..config import StructAlignRAGConfig
+from ..config import StructAlignLiteConfig
 from ..utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -12,14 +12,14 @@ logger = get_logger(__name__)
 Adj = Dict[str, List[Tuple[str, float, str]]]
 
 
-def _allowed_edge_types(config: StructAlignRAGConfig) -> Set[str]:
+def _allowed_edge_types(config: StructAlignLiteConfig) -> Set[str]:
     allowed = {"mentions", "in_passage", "in_doc", "entails", "contradicts"}
     if bool(getattr(config, "ppr_allow_sim_edges", False)):
         allowed.add("sim")
     return allowed
 
 
-def _edge_strength(config: StructAlignRAGConfig, typ: str, cost: float) -> float:
+def _edge_strength(config: StructAlignLiteConfig, typ: str, cost: float) -> float:
     eps = float(getattr(config, "ppr_eps", 1e-6) or 1e-6)
     typ = str(typ)
     if typ == "mentions":
@@ -46,7 +46,7 @@ def induce_subgraph_nodes(
     *,
     adj: Adj,
     seed_nodes: Sequence[str],
-    config: StructAlignRAGConfig,
+    config: StructAlignLiteConfig,
 ) -> Set[str]:
     """
     BFS k-hop induced subgraph on selected edge types.
@@ -98,7 +98,7 @@ def mini_ppr(
     adj: Adj,
     nodes: Sequence[str],
     seed_weights: Dict[str, float],
-    config: StructAlignRAGConfig,
+    config: StructAlignLiteConfig,
 ) -> Dict[str, float]:
     """
     Sparse power-iteration personalized PageRank on a small induced subgraph.
@@ -201,7 +201,7 @@ def run_local_propagation_rrf(
     adj: Adj,
     seed_capsules: Sequence[str],
     seed_entities: Sequence[str],
-    config: StructAlignRAGConfig,
+    config: StructAlignLiteConfig,
 ) -> Dict[str, Any]:
     """
     Query-level local propagation:
@@ -275,4 +275,3 @@ def run_local_propagation_rrf(
         "top_docs": top_doc_pairs,
         "top_passage_ids": top_passage_ids,
     }
-

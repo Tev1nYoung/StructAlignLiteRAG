@@ -4,7 +4,7 @@ import re
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Tuple
 
-from ..config import StructAlignRAGConfig
+from ..config import StructAlignLiteConfig
 from ..utils.text_utils import normalize_entity
 from ..utils.union_find import UnionFind
 
@@ -155,7 +155,7 @@ def _is_valid_entity_surface(surface: str) -> bool:
 def canonicalize_entities(
     capsules: List[Dict[str, Any]],
     doc_titles: List[str],
-    config: StructAlignRAGConfig,
+    config: StructAlignLiteConfig,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     """
     Returns (entities, surface_to_entity_id).

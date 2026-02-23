@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from ..config import StructAlignRAGConfig
+from ..config import StructAlignLiteConfig
 from ..utils.logging_utils import get_logger
 from ..utils.text_utils import extract_entity_mentions, normalize_entity
 from ..utils.genericness_utils import title_genericness_score
@@ -144,15 +144,6 @@ def _topo_sort(node_ids: List[str], parents: Dict[str, Set[str]]) -> List[str]:
     return out
 
 
-def _entity_overlap(a: Set[str], b: Set[str]) -> int:
-    if not a or not b:
-        return 0
-    # Use smaller set for efficiency.
-    if len(a) > len(b):
-        a, b = b, a
-    return sum(1 for x in a if x in b)
-
-
 def dijkstra_path(
     adj: Dict[str, List[Tuple[str, float, str]]],
     src: str,
@@ -208,7 +199,7 @@ class RetrievalResult:
 
 
 class StructAlignRetriever:
-    def __init__(self, config: StructAlignRAGConfig) -> None:
+    def __init__(self, config: StructAlignLiteConfig) -> None:
         self.config = config
 
     def retrieve(
@@ -252,13 +243,11 @@ class StructAlignRetriever:
             if pid:
                 pid_to_row.setdefault(pid, int(i))
         can_id_to_cap = {c["canonical_id"]: c for c in canonical_capsules}
-        cap_node_to_entset: Dict[str, Set[str]] = {}
         cap_node_to_docset: Dict[str, Set[int]] = {}
         for c in canonical_capsules:
             cid = str(c.get("canonical_id"))
             if not cid:
                 continue
-            cap_node_to_entset[f"C:{cid}"] = set(str(e) for e in (c.get("entity_ids") or []) if e)
             docset: Set[int] = set()
             for prov in c.get("provenance") or []:
                 didx = (prov or {}).get("doc_idx")
@@ -460,72 +449,63 @@ class StructAlignRetriever:
                             g["candidates"] = sorted(g.get("candidates") or [], key=lambda x: float(x.get("prize") or 0.0), reverse=True)
                             group_prize_maps[gid] = pm
         except Exception as e:
-            logger.debug(f"[StructAlignRAG] [PPR] skipped | err={type(e).__name__}: {e}")
+            logger.debug(f"[StructAlignLiteRAG] [PPR] skipped | err={type(e).__name__}: {e}")
 
         # DAG-aware binding assignment (zero-shot variable binding via entity overlap).
         parents = _build_parent_map(query_dag, set(node_ids))
         topo = _topo_sort(node_ids, parents)
 
-        # Beam search over the DAG order.
-        # State: (score, assignment_dict, used_docs, used_caps)
-        beam: List[Tuple[float, Dict[str, str], Set[int], Set[str]]] = [(0.0, {}, set(), set())]
+        # Greedy assignment over the DAG order (lite).
+        # This is equivalent to the previous beam search with beam size 1 and zero overlap bonus/penalty.
+        # but avoids computing parent overlap/penalty terms that are always zero in Lite.
         group_to_cands: Dict[str, List[Dict[str, Any]]] = {g["group_id"]: g["candidates"] for g in group_candidates}
+        chosen_assign: Dict[str, str] = {}
+        used_docs: Set[int] = set()
+        used_caps: Set[str] = set()
+        best_score = 0.0
 
         for gid in topo:
             cands = group_to_cands.get(gid) or []
             if not cands:
-                # No candidates: propagate as-is.
-                beam = [(s, dict(a, **{gid: "C:__none__"}), set(used_docs), set(used_caps)) for s, a, used_docs, used_caps in beam]
+                chosen_assign[gid] = "C:__none__"
                 continue
 
             cands = cands[: max(1, int(self.config.binding_candidate_k))]
-            new_beam: List[Tuple[float, Dict[str, str], Set[int], Set[str]]] = []
-            pgids = sorted(parents.get(gid) or [])
+            best_nid: str | None = None
+            best_base = -1e18
+            best_cand_docs: Set[int] = set()
 
-            for score, assign, used_docs, used_caps in beam:
-                parent_nodes = [assign.get(p) for p in pgids if p in assign]
-                parent_entsets = [cap_node_to_entset.get(n, set()) for n in parent_nodes if n and n.startswith("C:")]
+            for c in cands:
+                nid = str(c.get("node_id") or "")
+                if not nid:
+                    continue
+                base = float(c.get("prize") or 0.0)
 
-                for c in cands:
-                    nid = str(c["node_id"])
-                    base = float(c["prize"])
+                # Encourage multi-doc coverage (multi-hop) and avoid degenerate "all groups -> same doc".
+                cand_docs = cap_node_to_docset.get(nid, set())
+                if cand_docs:
+                    novel = len(cand_docs - used_docs)
+                    repeat = len(cand_docs & used_docs)
+                    base += float(getattr(self.config, "binding_doc_diversity_bonus", 0.0)) * float(novel)
+                    base -= float(getattr(self.config, "binding_repeat_doc_penalty", 0.0)) * float(repeat)
 
-                    # Structural alignment bonus/penalty: prefer candidates sharing entities with parents.
-                    overlap = 0
-                    if parent_entsets:
-                        cent = cap_node_to_entset.get(nid, set())
-                        for pe in parent_entsets:
-                            overlap += _entity_overlap(cent, pe)
-                        if overlap > 0:
-                            base += float(self.config.binding_overlap_bonus) * float(overlap)
-                        else:
-                            base -= float(self.config.binding_no_overlap_penalty)
+                # Soft diversity over capsules (avoid picking the exact same capsule for every group).
+                if nid in used_caps:
+                    base -= float(getattr(self.config, "binding_repeat_capsule_penalty", 0.0))
 
-                    # Encourage multi-doc coverage (multi-hop) and avoid degenerate "all groups -> same doc".
-                    cand_docs = cap_node_to_docset.get(nid, set())
-                    if cand_docs:
-                        novel = len(cand_docs - used_docs)
-                        repeat = len(cand_docs & used_docs)
-                        base += float(getattr(self.config, "binding_doc_diversity_bonus", 0.0)) * float(novel)
-                        base -= float(getattr(self.config, "binding_repeat_doc_penalty", 0.0)) * float(repeat)
+                if base > best_base:
+                    best_base = float(base)
+                    best_nid = nid
+                    best_cand_docs = set(cand_docs)
 
-                    # Soft diversity over capsules (avoid picking the exact same capsule for every group).
-                    if nid in used_caps:
-                        base -= float(getattr(self.config, "binding_repeat_capsule_penalty", 0.0))
+            if best_nid is None:
+                chosen_assign[gid] = "C:__none__"
+                continue
 
-                    new_assign = dict(assign)
-                    new_assign[gid] = nid
-                    new_used_docs = set(used_docs)
-                    new_used_docs.update(cand_docs)
-                    new_used_caps = set(used_caps)
-                    new_used_caps.add(nid)
-                    new_beam.append((score + base, new_assign, new_used_docs, new_used_caps))
-
-            # Keep top beam states.
-            new_beam.sort(key=lambda x: x[0], reverse=True)
-            beam = new_beam[: max(1, int(self.config.binding_beam_size))]
-
-        best_score, chosen_assign, _used_docs_best, _used_caps_best = max(beam, key=lambda x: x[0])
+            chosen_assign[gid] = best_nid
+            used_docs.update(best_cand_docs)
+            used_caps.add(best_nid)
+            best_score += float(best_base)
 
         # Induced nodes set
         induced: Set[str] = set()
@@ -688,7 +668,7 @@ class StructAlignRetriever:
                             continue
                         doc_score[didx] = float(doc_score.get(didx, 0.0)) + ppr_doc_w * float(rrf)
         except Exception as e:
-            logger.debug(f"[StructAlignRAG] [PPR] doc boost skipped | err={type(e).__name__}: {e}")
+            logger.debug(f"[StructAlignLiteRAG] [PPR] doc boost skipped | err={type(e).__name__}: {e}")
 
         # Entity-jump: if an entity mentioned in high-prize capsules matches a doc title in the corpus,
         # boost that doc. This is a cheap zero-shot way to recover second-hop pages.
@@ -845,10 +825,10 @@ class StructAlignRetriever:
                     rest = [int(d) for d in struct_docs_rank if int(d) not in seen]
                     struct_docs_rank = sel_docs + rest
                     logger.debug(
-                        f"[StructAlignRAG] [ONLINE_RERANK] applied | top_n={top_n} selected={sel_docs} cache_hit={bool((meta or {}).get('cache_hit'))}"
+                        f"[StructAlignLiteRAG] [ONLINE_RERANK] applied | top_n={top_n} selected={sel_docs} cache_hit={bool((meta or {}).get('cache_hit'))}"
                     )
             except Exception as e:
-                logger.debug(f"[StructAlignRAG] [ONLINE_RERANK] skipped | err={type(e).__name__}: {e}")
+                logger.debug(f"[StructAlignLiteRAG] [ONLINE_RERANK] skipped | err={type(e).__name__}: {e}")
 
         # Build retrieved_docs list: struct-selected first, then dense fill.
         retrieved_docs: List[str] = []

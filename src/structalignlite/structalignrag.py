@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 
 from tqdm import tqdm
 
-from .config import DEFAULT_LLM_BASE_URL, StructAlignRAGConfig
+from .config import DEFAULT_LLM_BASE_URL, StructAlignLiteConfig
 from .embed.factory import build_embedder
 from .llm.openai_compat import CacheOpenAICompat, maybe_set_llm_key_from_file
 from .metrics.metrics import extra_metrics, qa_em_f1, retrieval_recall
@@ -84,8 +84,8 @@ def _maybe_rotate_legacy_metrics(path: str) -> None:
         return
 
 
-class StructAlignRAG:
-    def __init__(self, config: StructAlignRAGConfig) -> None:
+class StructAlignLiteRAG:
+    def __init__(self, config: StructAlignLiteConfig) -> None:
         self.config = config
         self.run_tag = sanitize_model_name(str(config.run_tag)) if getattr(config, "run_tag", None) else None
 
@@ -110,7 +110,7 @@ class StructAlignRAG:
         self._maybe_migrate_legacy_outputs(llm_tag=llm_tag)
 
         logger.info(
-            f"[StructAlignRAG] initialized | dataset={config.dataset} llm={config.llm_name} emb={config.embedding_model_name}"
+            f"[StructAlignLiteRAG] initialized | dataset={config.dataset} llm={config.llm_name} emb={config.embedding_model_name}"
         )
 
         # Models
@@ -205,14 +205,14 @@ class StructAlignRAG:
                 if _move_file_if_needed(src, dst):
                     moved += 1
             if moved:
-                logger.info(f"[StructAlignRAG] migrated legacy offline artifacts -> reusable/ | moved_files={moved}")
+                logger.info(f"[StructAlignLiteRAG] migrated legacy offline artifacts -> reusable/ | moved_files={moved}")
 
         # 2) QA outputs -> metrics/
         for fn in ["metrics_log.jsonl", "qa_predictions.json"]:
             src = os.path.join(self.meta_dir, fn)
             dst = os.path.join(self.metrics_dir, fn)
             if _move_file_if_needed(src, dst):
-                logger.info(f"[StructAlignRAG] migrated legacy QA output -> metrics/ | file={fn}")
+                logger.info(f"[StructAlignLiteRAG] migrated legacy QA output -> metrics/ | file={fn}")
 
         # 3) LLM cache -> non_reusable/llm_cache/
         legacy_cache_dir = os.path.join(self.config.save_dir(), "llm_cache")
@@ -223,7 +223,7 @@ class StructAlignRAG:
         new_lock_file = new_cache_file + ".lock"
 
         if _move_file_if_needed(legacy_cache_file, new_cache_file):
-            logger.info(f"[StructAlignRAG] migrated legacy llm_cache sqlite -> non_reusable/llm_cache/ | llm={llm_tag}")
+            logger.info(f"[StructAlignLiteRAG] migrated legacy llm_cache sqlite -> non_reusable/llm_cache/ | llm={llm_tag}")
         _move_file_if_needed(legacy_lock_file, new_lock_file)
 
         # Optional: cleanup empty legacy cache dir (best effort).
@@ -270,11 +270,11 @@ class StructAlignRAG:
             except Exception:
                 workers = 1
 
-        logger.info(f"[StructAlignRAG] [RAG_QA] start | num_queries={n} workers={workers}")
+        logger.info(f"[StructAlignLiteRAG] [RAG_QA] start | num_queries={n} workers={workers}")
 
         def _run_one(i: int, qid: str, q: str) -> Dict[str, Any]:
             qt0 = time.time()
-            logger.info(f"[StructAlignRAG] [Step 1-5] query start | qid={qid} | {q}")
+            logger.info(f"[StructAlignLiteRAG] [Step 1-5] query start | qid={qid} | {q}")
 
             dag = build_query_dag(q, llm=self.llm, config=self.config)
             rr = self.retriever.retrieve(question=q, query_dag=dag, index=index, embedder=self.embedder, llm=self.llm)
@@ -349,7 +349,7 @@ class StructAlignRAG:
 
         with open(self.pred_path, "w", encoding="utf-8") as f:
             json.dump(preds_f, f, ensure_ascii=False, indent=2)
-        logger.info(f"[StructAlignRAG] [RAG_QA] predictions written | {self.pred_path}")
+        logger.info(f"[StructAlignLiteRAG] [RAG_QA] predictions written | {self.pred_path}")
 
         # Metrics
         qa_metrics = qa_em_f1(gold_answers=gold_answers, predicted_answers=predicted_answers_f)
@@ -427,10 +427,10 @@ class StructAlignRAG:
         if self.metrics_log_path_run:
             _maybe_rotate_legacy_metrics(self.metrics_log_path_run)
             _append_hipporag_style_metrics(self.metrics_log_path_run, record)
-        logger.info(f"[StructAlignRAG] [Metrics] appended metrics log | {self.metrics_log_path}")
+        logger.info(f"[StructAlignLiteRAG] [Metrics] appended metrics log | {self.metrics_log_path}")
 
         logger.info(
-            f"[StructAlignRAG] [RAG_QA] done | EM={qa_metrics.get('ExactMatch')} F1={qa_metrics.get('F1')} "
+            f"[StructAlignLiteRAG] [RAG_QA] done | EM={qa_metrics.get('ExactMatch')} F1={qa_metrics.get('F1')} "
             f"R@5={(retrieval_metrics or {}).get('Recall@5')} SubQCoverage={extra.get('SubQCoverage')}"
         )
         return metrics
@@ -467,11 +467,11 @@ class StructAlignRAG:
             except Exception:
                 workers = 1
 
-        logger.info(f"[StructAlignRAG] [RETRIEVAL_ONLY] start | num_queries={n} workers={workers}")
+        logger.info(f"[StructAlignLiteRAG] [RETRIEVAL_ONLY] start | num_queries={n} workers={workers}")
 
         def _run_one(i: int, qid: str, q: str) -> Dict[str, Any]:
             qt0 = time.time()
-            logger.info(f"[StructAlignRAG] [Step 1-4] query start | qid={qid} | {q}")
+            logger.info(f"[StructAlignLiteRAG] [Step 1-4] query start | qid={qid} | {q}")
 
             dag = build_query_dag(q, llm=self.llm, config=self.config)
             rr = self.retriever.retrieve(question=q, query_dag=dag, index=index, embedder=self.embedder, llm=self.llm)
@@ -533,7 +533,7 @@ class StructAlignRAG:
         pred_path = os.path.join(self._metrics_dir_for_run(), "retrieval_predictions.json")
         with open(pred_path, "w", encoding="utf-8") as f:
             json.dump(preds_f, f, ensure_ascii=False, indent=2)
-        logger.info(f"[StructAlignRAG] [RETRIEVAL_ONLY] predictions written | {pred_path}")
+        logger.info(f"[StructAlignLiteRAG] [RETRIEVAL_ONLY] predictions written | {pred_path}")
 
         retrieval_metrics = retrieval_recall(
             gold_docs=gold_docs,
@@ -599,10 +599,10 @@ class StructAlignRAG:
         if self.metrics_log_path_run:
             _maybe_rotate_legacy_metrics(self.metrics_log_path_run)
             _append_hipporag_style_metrics(self.metrics_log_path_run, record)
-        logger.info(f"[StructAlignRAG] [Metrics] appended metrics log | {self.metrics_log_path}")
+        logger.info(f"[StructAlignLiteRAG] [Metrics] appended metrics log | {self.metrics_log_path}")
 
         logger.info(
-            f"[StructAlignRAG] [RETRIEVAL_ONLY] done | R@5={(retrieval_metrics or {}).get('Recall@5')} "
+            f"[StructAlignLiteRAG] [RETRIEVAL_ONLY] done | R@5={(retrieval_metrics or {}).get('Recall@5')} "
             f"SubQCoverage={extra.get('SubQCoverage')}"
         )
         return {"retrieval_metrics": retrieval_metrics, "extra_metrics": extra}

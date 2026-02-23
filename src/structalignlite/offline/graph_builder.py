@@ -9,7 +9,7 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 
-from ..config import StructAlignRAGConfig
+from ..config import StructAlignLiteConfig
 from ..utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -28,7 +28,7 @@ def _add_edge(adj: Dict[str, List[Tuple[str, float, str]]], edges: List[EdgeRow]
 
 
 def build_evidence_graph(
-    config: StructAlignRAGConfig,
+    config: StructAlignLiteConfig,
     docs: List[Dict[str, Any]],
     passages: List[Dict[str, Any]],
     entities: List[Dict[str, Any]],
@@ -124,5 +124,5 @@ def build_evidence_graph(
     with open(adj_path, "wb") as f:
         pickle.dump(adj, f)
 
-    logger.info(f"[StructAlignRAG] [OFFLINE_GRAPH] written | edges={len(edges)} path={edge_path}")
+    logger.info(f"[StructAlignLiteRAG] [OFFLINE_GRAPH] written | edges={len(edges)} path={edge_path}")
     return {"edge_path": edge_path, "adj_path": adj_path, "num_edges": len(edges), "num_nodes": len(adj)}

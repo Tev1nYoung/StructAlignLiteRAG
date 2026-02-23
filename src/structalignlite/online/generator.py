@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
-from ..config import StructAlignRAGConfig
+from ..config import StructAlignLiteConfig
 from ..utils.logging_utils import get_logger
 from ..utils.text_utils import normalize_answer
 
@@ -381,7 +381,7 @@ def _extract_span_from_evidence(question: str, passages: List[Dict[str, Any]]) -
 
 
 class AnswerGenerator:
-    def __init__(self, config: StructAlignRAGConfig, llm) -> None:
+    def __init__(self, config: StructAlignLiteConfig, llm) -> None:
         self.config = config
         self.llm = llm
 
@@ -429,7 +429,7 @@ class AnswerGenerator:
                 seed=self.config.seed,
             )
         except Exception as e:
-            logger.warning(f"[StructAlignRAG] [GEN_FINAL] LLM infer failed | err={type(e).__name__}: {e}")
+            logger.warning(f"[StructAlignLiteRAG] [GEN_FINAL] LLM infer failed | err={type(e).__name__}: {e}")
             raw, meta = (raw or ""), {"error": str(e)}
 
         ans = _postprocess_answer(raw or "", question=question)

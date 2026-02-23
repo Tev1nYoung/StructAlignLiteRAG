@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any, Dict, List
 
-from ..config import StructAlignRAGConfig
+from ..config import StructAlignLiteConfig
 from ..utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -133,7 +133,7 @@ def _lines_to_chain_dag(question: str, lines: List[str], max_nodes: int) -> Dict
     return {"question": question, "nodes": nodes, "edges": edges}
 
 
-def build_query_dag(question: str, llm, config: StructAlignRAGConfig) -> Dict[str, Any]:
+def build_query_dag(question: str, llm, config: StructAlignLiteConfig) -> Dict[str, Any]:
     """
     Returns a JSON-serializable Query DAG dict.
     Falls back to a single-node DAG on parse/LLM failures.
@@ -259,5 +259,5 @@ def build_query_dag(question: str, llm, config: StructAlignRAGConfig) -> Dict[st
         except Exception:
             pass
 
-        logger.warning(f"[StructAlignRAG] [ONLINE_QDAG] fallback to single-node DAG | err={type(e).__name__}: {e}")
+        logger.warning(f"[StructAlignLiteRAG] [ONLINE_QDAG] fallback to single-node DAG | err={type(e).__name__}: {e}")
         return _single_node_dag(question)

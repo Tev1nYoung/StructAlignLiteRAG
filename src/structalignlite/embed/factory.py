@@ -18,7 +18,7 @@ def build_embedder(
     if "nv-embed-v2" in name or "nv_embed_v2" in name:
         if int(max_length) < 2048:
             logger.warning(
-                f"[StructAlignRAG] NV-Embed-v2 is typically run with a larger max_length (e.g., 2048). "
+                f"[StructAlignLiteRAG] NV-Embed-v2 is typically run with a larger max_length (e.g., 2048). "
                 f"Current embedding_max_seq_len={max_length}."
             )
         return NVEmbedV2Embedder(

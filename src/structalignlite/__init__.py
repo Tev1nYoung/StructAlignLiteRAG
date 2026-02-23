@@ -1,4 +1,3 @@
-__all__ = ["StructAlignRAG"]
+__all__ = ["StructAlignLiteRAG"]
 
-from .structalignrag import StructAlignRAG
-
+from .structalignrag import StructAlignLiteRAG

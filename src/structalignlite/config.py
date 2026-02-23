@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -9,7 +9,7 @@ DEFAULT_EMB_NAME = "facebook/contriever"
 
 
 @dataclass
-class StructAlignRAGConfig:
+class StructAlignLiteConfig:
     # I/O
     dataset: str = "sample"
     save_root: str = "outputs"
@@ -53,20 +53,9 @@ class StructAlignRAGConfig:
     sim_edge_topk: int = 32
     sim_edge_threshold: float = 0.82
 
-    # Optional NLI edges (LLM-based, cached)
-    enable_nli_edges: bool = False
-    nli_max_pairs: int = 2000
-    nli_min_sim: float = 0.9
-    nli_llm_workers: int = 1
-
     # Online: query decomposition
     enable_query_dag: bool = True
     query_dag_max_nodes: int = 7
-
-    # Online: retrieval baseline
-    # - structalign: full StructAlignRAG pipeline
-    # - dense_only: dense passage->doc ranking baseline (skips structural modules)
-    retrieval_baseline: str = "structalign"  # structalign|dense_only
 
     # Online: candidate generation
     subq_top_capsule: int = 50
@@ -96,29 +85,19 @@ class StructAlignRAGConfig:
 
     # Online: structure-aligned selection (binding/assignment)
     binding_candidate_k: int = 12  # per subQ, how many candidates to consider for binding
-    binding_beam_size: int = 1  # beam size for DAG-consistent assignment (lite_a)
-    binding_overlap_bonus: float = 0.0  # bonus per shared entity along DAG edges (lite_a)
-    binding_no_overlap_penalty: float = 0.0  # penalty if a child has zero overlap with its parents (lite_a)
+    # Lite binding uses greedy assignment (beam=1) without parent-overlap bonus/penalty.
     binding_doc_diversity_bonus: float = 0.08  # encourage selecting capsules from different docs across subQs
     binding_repeat_doc_penalty: float = 0.03  # soft penalty for reusing a doc already selected by earlier subQs
     binding_repeat_capsule_penalty: float = 0.02  # soft penalty for selecting the exact same capsule repeatedly
-    doc_rank_diversify: bool = False  # legacy flag (disabled in lite_a)
     doc_dense_score_weight: float = 0.9  # blend dense doc signal into structural doc ranking
     doc_rrf_k: int = 60  # RRF constant (larger -> flatter)
     doc_rrf_pool: int = 120  # how many top docs per query to include in RRF
     doc_rrf_weight: float = 5.0  # weight of RRF score when fusing with structural doc score
-    doc_group_top_k: int = 15  # per-subQ dense top docs considered as "covering" that group
-    doc_diversify_pool: int = 200  # diversify only inside this top-score pool
-    doc_diversify_n: int = 5  # diversify the first N docs (targets Recall@5)
-    doc_diversify_gain_weight: float = 0.06  # score+gain tradeoff when diversifying early ranks
 
     # Online: entity jump expansion (capsule -> entity -> doc(title))
     entity_jump_top_m: int = 25
     entity_jump_bonus: float = 0.6
     # Genericness (unsupervised, corpus-derived; avoids hardcoded blocklists)
-    enable_genericness_penalty: bool = False  # disabled in lite_a (doc-score penalty removed)
-    genericness_penalty_weight: float = 0.35  # subtract weight * scaled_genericness from doc ranking
-    genericness_penalty_threshold: float = 0.85  # only penalize docs with genericness >= threshold
     genericness_skip_threshold: float = 0.85  # skip jumps (entity/mention) to overly-generic titles
 
     # Doc-mention jump: seed from top doc passages -> extract TitleCase mentions -> boost matching doc titles.
@@ -138,18 +117,6 @@ class StructAlignRAGConfig:
     qa_top_k_passages: int = 5  # number of passages fed to LLM (match HippoRAG default)
     qa_ensure_top_docs: int = 2  # ensure evidence includes at least this many top-ranked docs (if available)
     passage_token_budget: int = 1800
-
-    # Online: global evidence selection (coverage-aware passage packing)
-    enable_global_evidence_selection: bool = False  # disabled in lite_a (module removed)
-    evidence_pool_doc_n: int = 50
-    evidence_pool_passages_per_doc: int = 4
-    evidence_pool_global_dense_n: int = 120
-    evidence_pool_add_ppr_passages: bool = True
-    evidence_pool_ppr_passage_n: int = 50
-    evidence_dense_w: float = 0.25
-    evidence_gain_w: float = 0.75
-    evidence_same_doc_penalty: float = 0.10
-    evidence_len_penalty: float = 0.0
     subq_coverage_top_m: int = 5
 
     # GCP parameters

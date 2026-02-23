@@ -2,7 +2,7 @@ import argparse
 import os
 import time
 
-from src.structalignlite.config import DEFAULT_EMB_NAME, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_NAME, StructAlignRAGConfig
+from src.structalignlite.config import DEFAULT_EMB_NAME, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_NAME, StructAlignLiteConfig
 from src.structalignlite.data.dataset_loader import (
     cap_samples,
     get_gold_answers,
@@ -10,7 +10,7 @@ from src.structalignlite.data.dataset_loader import (
     load_corpus,
     load_samples,
 )
-from src.structalignlite.structalignrag import StructAlignRAG
+from src.structalignlite.structalignrag import StructAlignLiteRAG
 from src.structalignlite.utils.logging_utils import setup_logging
 
 
@@ -104,7 +104,7 @@ def main() -> None:
 
     run_tag = args.run_tag or f"smoke_{run_mode}"
 
-    cfg = StructAlignRAGConfig(
+    cfg = StructAlignLiteConfig(
         dataset=dataset,
         save_root=args.save_root,
         run_tag=run_tag,
@@ -130,7 +130,7 @@ def main() -> None:
         cfg.embedding_query_instruction = str(args.embedding_query_instruction)
 
     t0 = time.time()
-    rag = StructAlignRAG(cfg)
+    rag = StructAlignLiteRAG(cfg)
     t_init = time.time() - t0
 
     t1 = time.time()
@@ -147,4 +147,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
