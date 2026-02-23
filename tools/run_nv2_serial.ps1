@@ -116,10 +116,13 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
   Write-Host ("      stderr={0}" -f $stderr)
   Write-Host ("      conda_env={0} conda_prefix={1}" -f $envName, $condaPrefix)
   if ($useCondaRun) {
-    $condaExe = (Get-Command conda -ErrorAction Stop).Source
+    $condaCmd = Get-Command conda -ErrorAction Stop
+    $condaExe = $condaCmd.Source
+    if ([string]::IsNullOrWhiteSpace($condaExe)) { $condaExe = $condaCmd.Name }
+    $condaArgList = @("run", "-n", $envName, "python") + $args
     Write-Host ("      mode=conda_run conda_exe={0}" -f $condaExe)
-    Write-Host ("      cmd={0} run -n {1} python {2}" -f $condaExe, $envName, ($args -join " "))
-    $p = Start-Process -FilePath $condaExe -ArgumentList @("run", "-n", $envName, "python") + $args -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    Write-Host ("      cmd={0} {1}" -f $condaExe, ($condaArgList -join " "))
+    $p = Start-Process -FilePath $condaExe -ArgumentList $condaArgList -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
   } else {
     Write-Host ("      mode=python_exe python_exe={0}" -f $pythonExe)
     Write-Host ("      cmd={0} {1}" -f $pythonExe, ($args -join " "))
