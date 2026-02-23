@@ -199,10 +199,11 @@ try {
     $retrTag = "nv2_retrieval_{0}" -f $ds
     $qaTag = "nv2_rag_qa_{0}" -f $ds
 
-    Run-One -dataset $ds -runMode "retrieval_only" -runTag $retrTag -forceIndexFromScratch:$ForceRebuild
-
-    if (-not $RetrievalOnly -and -not $SkipQA) {
-      Run-One -dataset $ds -runMode "rag_qa" -runTag $qaTag -forceIndexFromScratch:$false
+    if ($RetrievalOnly -or $SkipQA) {
+      Run-One -dataset $ds -runMode "retrieval_only" -runTag $retrTag -forceIndexFromScratch:$ForceRebuild
+    } else {
+      # Default: full end-to-end
+      Run-One -dataset $ds -runMode "rag_qa" -runTag $qaTag -forceIndexFromScratch:$ForceRebuild
     }
   }
 

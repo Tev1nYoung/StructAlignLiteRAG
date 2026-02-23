@@ -58,13 +58,13 @@ If you want a single command to run the full suite serially with NV2 on another 
 conda activate hipporag
 cd C:\Project\StructAlignLiteRAG
 
-# Fresh run (delete existing outputs for those datasets) + run retrieval_only then rag_qa
+# Fresh run (delete existing outputs for those datasets) + run full end-to-end (rag_qa)
 powershell -ExecutionPolicy Bypass -File tools\run_nv2_serial.ps1 -CleanOutputs -ForceRebuild
 ```
 
 Useful flags:
 - `-Datasets @("sample","case_study_university","2wikimultihopqa","hotpotqa","musique","nq_rear","popqa")` (override dataset list)
-- `-RetrievalOnly` (only run `retrieval_only` for all datasets)
-- `-SkipQA` (same as above; keep retrieval_only only)
+- `-RetrievalOnly` (only run `retrieval_only` for all datasets; useful as a cheap gate)
+- `-SkipQA` (same as above)
 - `-Resume` (skip runs when the target predictions file already exists)
 - `-OfflineLLMWorkers 16 -OnlineQAWorkers 8` (defaults already match the project)
