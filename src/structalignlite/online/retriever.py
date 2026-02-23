@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import heapq
 import json
 import re
 import time
@@ -142,53 +141,6 @@ def _topo_sort(node_ids: List[str], parents: Dict[str, Set[str]]) -> List[str]:
     if len(out) != len(node_ids):
         return list(node_ids)
     return out
-
-
-def dijkstra_path(
-    adj: Dict[str, List[Tuple[str, float, str]]],
-    src: str,
-    dst: str,
-    allowed: Set[str],
-) -> Optional[List[str]]:
-    if src == dst:
-        return [src]
-    if src not in allowed or dst not in allowed:
-        return None
-
-    dist: Dict[str, float] = {src: 0.0}
-    prev: Dict[str, str] = {}
-    pq: List[Tuple[float, str]] = [(0.0, src)]
-    visited: Set[str] = set()
-
-    while pq:
-        d, u = heapq.heappop(pq)
-        if u in visited:
-            continue
-        visited.add(u)
-        if u == dst:
-            break
-        for v, w, _typ in adj.get(u, []):
-            if v not in allowed:
-                continue
-            nd = d + float(w)
-            if nd < dist.get(v, float("inf")):
-                dist[v] = nd
-                prev[v] = u
-                heapq.heappush(pq, (nd, v))
-
-    if dst not in prev and dst != src:
-        return None
-
-    # reconstruct
-    path = [dst]
-    cur = dst
-    while cur != src:
-        cur = prev.get(cur)
-        if cur is None:
-            return None
-        path.append(cur)
-    path.reverse()
-    return path
 
 
 @dataclass
@@ -507,54 +459,6 @@ class StructAlignRetriever:
             used_caps.add(best_nid)
             best_score += float(best_base)
 
-        # Induced nodes set
-        induced: Set[str] = set()
-        for g in group_candidates:
-            # Keep induced graph compact: only the most promising candidates per group.
-            keep_n = max(int(self.config.binding_candidate_k), int(self.config.seed_top_s))
-            for x in g["candidates"][:keep_n]:
-                induced.add(x["node_id"])
-                cap = can_id_to_cap.get(x["node_id"].split(":", 1)[1])
-                if not cap:
-                    continue
-                for ent_id in cap.get("entity_ids", []):
-                    induced.add(f"E:{ent_id}")
-                for prov in cap.get("provenance") or []:
-                    pid = prov.get("passage_id")
-                    didx = prov.get("doc_idx")
-                    if pid:
-                        induced.add(f"P:{pid}")
-                    if didx is not None:
-                        induced.add(f"D:{int(didx)}")
-
-                # Optional: include sim neighbors to allow structure alignment to use sim edges.
-                if self.config.neighbor_expand_sim_top_m and self.config.neighbor_expand_sim_top_m > 0:
-                    neighbors = [t for t in adj.get(x["node_id"], []) if t[2] == "sim"]
-                    neighbors = sorted(neighbors, key=lambda t: t[1])[: int(self.config.neighbor_expand_sim_top_m)]
-                    for v, _w, _typ in neighbors:
-                        induced.add(v)
-
-        # Cap induced size (MVP: keep as-is; too large is unlikely with current defaults)
-        if len(induced) > self.config.induced_max_nodes:
-            # Keep only top candidates per group.
-            keep: Set[str] = set()
-            for g in group_candidates:
-                for x in g["candidates"][: max(10, self.config.seed_top_s)]:
-                    keep.add(x["node_id"])
-                    cap = can_id_to_cap.get(x["node_id"].split(":", 1)[1])
-                    if not cap:
-                        continue
-                    for ent_id in cap.get("entity_ids", []):
-                        keep.add(f"E:{ent_id}")
-                    for prov in cap.get("provenance") or []:
-                        pid = prov.get("passage_id")
-                        didx = prov.get("doc_idx")
-                        if pid:
-                            keep.add(f"P:{pid}")
-                        if didx is not None:
-                            keep.add(f"D:{int(didx)}")
-            induced = keep
-
         chosen: Dict[str, str] = dict(chosen_assign)
         # Root: pick a root group (no parents) with highest per-group prize.
         roots = [gid for gid in node_ids if not (parents.get(gid) or set())]
@@ -580,35 +484,6 @@ class StructAlignRetriever:
                 nid = str(x.get("node_id") or "")
                 if nid and nid != "C:__none__":
                     selected.add(nid)
-
-        # Connect along DAG dependencies (better than a single root-star for multi-hop binding).
-        any_edge = False
-        for child, ps in parents.items():
-            for p in ps:
-                any_edge = True
-                src = chosen.get(p)
-                dst = chosen.get(child)
-                if not src or not dst or src == "C:__none__" or dst == "C:__none__":
-                    continue
-                if src == dst:
-                    continue
-                path = dijkstra_path(adj, src, dst, induced)
-                if path is None:
-                    continue
-                for u in path:
-                    selected.add(u)
-
-        # Fallback: if DAG has no edges (or all empty), connect to root to allow expansion.
-        if not any_edge and root and root != "C:__none__":
-            selected.add(root)
-            for gid, nid in chosen.items():
-                if not nid or nid == "C:__none__" or nid == root:
-                    continue
-                path = dijkstra_path(adj, root, nid, induced)
-                if path is None:
-                    continue
-                for u in path:
-                    selected.add(u)
 
         # SubQCoverage is computed AFTER final evidence selection (coverage in chosen passages),
         # not from the internal selected-node set (which includes many seeds by design).

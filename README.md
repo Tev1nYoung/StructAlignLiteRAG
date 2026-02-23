@@ -30,3 +30,22 @@ Outputs are written under:
 
 `outputs/<dataset>/<llm>_<emb>/metrics/runs/<run_tag>/`
 
+## NV-Embed-v2 (other machine)
+
+Recommended workflow: run `retrieval_only` first to check `Recall@2/5` before spending QA budget, then run `rag_qa` if it looks competitive.
+
+Retrieval-only (build index once):
+
+```powershell
+python main.py --dataset 2wikimultihopqa --run_mode retrieval_only --embedding_name nvidia/NV-Embed-v2 --run_tag nv2_retrieval --force_index_from_scratch true --offline_llm_workers 16 --online_qa_workers 8
+python main.py --dataset hotpotqa         --run_mode retrieval_only --embedding_name nvidia/NV-Embed-v2 --run_tag nv2_retrieval --force_index_from_scratch true --offline_llm_workers 16 --online_qa_workers 8
+python main.py --dataset musique         --run_mode retrieval_only --embedding_name nvidia/NV-Embed-v2 --run_tag nv2_retrieval --force_index_from_scratch true --offline_llm_workers 16 --online_qa_workers 8
+```
+
+RAG QA (reuse index):
+
+```powershell
+python main.py --dataset 2wikimultihopqa --run_mode rag_qa --embedding_name nvidia/NV-Embed-v2 --run_tag nv2_rag_qa --force_index_from_scratch false --offline_llm_workers 16 --online_qa_workers 8
+python main.py --dataset hotpotqa         --run_mode rag_qa --embedding_name nvidia/NV-Embed-v2 --run_tag nv2_rag_qa --force_index_from_scratch false --offline_llm_workers 16 --online_qa_workers 8
+python main.py --dataset musique         --run_mode rag_qa --embedding_name nvidia/NV-Embed-v2 --run_tag nv2_rag_qa --force_index_from_scratch false --offline_llm_workers 16 --online_qa_workers 8
+```

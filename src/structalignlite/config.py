@@ -59,8 +59,6 @@ class StructAlignLiteConfig:
 
     # Online: candidate generation
     subq_top_capsule: int = 50
-    induced_max_nodes: int = 6000
-    neighbor_expand_sim_top_m: int = 0  # MVP: 0 disables sim expansion
 
     # Online: local propagation (mini-PPR on induced subgraph)
     enable_local_propagation: bool = True
