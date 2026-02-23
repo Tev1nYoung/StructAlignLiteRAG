@@ -62,6 +62,7 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
   }
 
   $pythonExe = $null
+  $useCondaRun = $false
   $envName = $CondaEnvName
   if ([string]::IsNullOrWhiteSpace($envName)) {
     $envName = $env:CONDA_DEFAULT_ENV
@@ -94,7 +95,19 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
       break
     }
   }
-  if ($null -eq $pythonExe) {
+  # If we can't reliably locate env python, fall back to `conda run -n <env> python ...`.
+  # This is robust when the script is launched from a fresh PowerShell process and CONDA env vars don't reflect the prompt.
+  if ($envName -ne "base") {
+    if ($null -eq $pythonExe) {
+      $useCondaRun = $true
+    } else {
+      $envNeedle = ("\\envs\\{0}\\" -f $envName).ToLowerInvariant()
+      if ($pythonExe.ToLowerInvariant().IndexOf($envNeedle) -lt 0) {
+        $useCondaRun = $true
+      }
+    }
+  }
+  if (-not $useCondaRun -and ($null -eq $pythonExe)) {
     throw "Cannot locate python.exe. Please run: conda activate hipporag, then run this script again."
   }
 
@@ -102,10 +115,17 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
   Write-Host ("      stdout={0}" -f $stdout)
   Write-Host ("      stderr={0}" -f $stderr)
   Write-Host ("      conda_env={0} conda_prefix={1}" -f $envName, $condaPrefix)
-  Write-Host ("      python_exe={0}" -f $pythonExe)
-  Write-Host ("      cmd={0} {1}" -f $pythonExe, ($args -join " "))
+  if ($useCondaRun) {
+    $condaExe = (Get-Command conda -ErrorAction Stop).Source
+    Write-Host ("      mode=conda_run conda_exe={0}" -f $condaExe)
+    Write-Host ("      cmd={0} run -n {1} python {2}" -f $condaExe, $envName, ($args -join " "))
+    $p = Start-Process -FilePath $condaExe -ArgumentList @("run", "-n", $envName, "python") + $args -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  } else {
+    Write-Host ("      mode=python_exe python_exe={0}" -f $pythonExe)
+    Write-Host ("      cmd={0} {1}" -f $pythonExe, ($args -join " "))
+    $p = Start-Process -FilePath $pythonExe -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  }
 
-  $p = Start-Process -FilePath $pythonExe -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
   $p.WaitForExit()
   $exitCode = $p.ExitCode
   if ($null -eq $exitCode) { $exitCode = "unknown" }
