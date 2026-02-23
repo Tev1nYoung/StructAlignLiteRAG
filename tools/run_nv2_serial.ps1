@@ -6,6 +6,7 @@ param(
   [string]$SaveRoot = "outputs",
   [int]$OfflineLLMWorkers = 16,
   [int]$OnlineQAWorkers = 8,
+  [string]$CondaEnvName = "",
   [switch]$RetrievalOnly,
   [switch]$SkipQA,
   [switch]$ForceRebuild,
@@ -61,17 +62,46 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
   }
 
   $pythonExe = $null
-  if (-not [string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
-    $candidate = Join-Path $env:CONDA_PREFIX "python.exe"
-    if (Test-Path $candidate) { $pythonExe = $candidate }
+  $envName = $CondaEnvName
+  if ([string]::IsNullOrWhiteSpace($envName)) {
+    $envName = $env:CONDA_DEFAULT_ENV
+  }
+  if ([string]::IsNullOrWhiteSpace($envName)) {
+    $envName = "hipporag"
+  }
+
+  $condaPrefix = $env:CONDA_PREFIX
+  $candidates = @()
+
+  # Prefer the env python if CONDA_PREFIX points to base (common when calling a fresh powershell process).
+  if (-not [string]::IsNullOrWhiteSpace($condaPrefix) -and $envName -ne "base") {
+    $candidates += (Join-Path $condaPrefix (Join-Path "envs\\$envName" "python.exe"))
+    $condaRoot = Split-Path -Parent $condaPrefix
+    if (-not [string]::IsNullOrWhiteSpace($condaRoot)) {
+      $candidates += (Join-Path $condaRoot (Join-Path "envs\\$envName" "python.exe"))
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($condaPrefix)) {
+    $candidates += (Join-Path $condaPrefix "python.exe")
+  }
+  $candidates += @(
+    (Get-Command python -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
+  )
+
+  foreach ($cand in $candidates) {
+    if (-not [string]::IsNullOrWhiteSpace($cand) -and (Test-Path $cand)) {
+      $pythonExe = $cand
+      break
+    }
   }
   if ($null -eq $pythonExe) {
-    $pythonExe = (Get-Command python -ErrorAction Stop).Source
+    throw "Cannot locate python.exe. Please run: conda activate hipporag, then run this script again."
   }
 
   Write-Host ("[RUN] {0} | {1} | tag={2} | force_rebuild={3}" -f $dataset, $runMode, $runTag, $forceIndexFromScratch)
   Write-Host ("      stdout={0}" -f $stdout)
   Write-Host ("      stderr={0}" -f $stderr)
+  Write-Host ("      conda_env={0} conda_prefix={1}" -f $envName, $condaPrefix)
   Write-Host ("      python_exe={0}" -f $pythonExe)
   Write-Host ("      cmd={0} {1}" -f $pythonExe, ($args -join " "))
 
