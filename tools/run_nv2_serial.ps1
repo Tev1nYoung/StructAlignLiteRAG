@@ -63,11 +63,21 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
   Write-Host ("[RUN] {0} | {1} | tag={2} | force_rebuild={3}" -f $dataset, $runMode, $runTag, $forceIndexFromScratch)
   Write-Host ("      stdout={0}" -f $stdout)
   Write-Host ("      stderr={0}" -f $stderr)
+  Write-Host ("      cmd=python {0}" -f ($args -join " "))
 
   $p = Start-Process -FilePath "python" -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
   $p.WaitForExit()
-  if ($p.ExitCode -ne 0) {
-    throw ("Run failed: dataset={0} mode={1} tag={2} (exit={3}). See: {4} / {5}" -f $dataset, $runMode, $runTag, $p.ExitCode, $stdout, $stderr)
+  $exitCode = $p.ExitCode
+  if ($null -eq $exitCode) { $exitCode = "unknown" }
+  if ($exitCode -ne 0 -and $exitCode -ne "unknown") {
+    Write-Host ("[FAIL] exit={0} (showing last 120 lines of stderr)" -f $exitCode)
+    if (Test-Path $stderr) { Get-Content -Tail 120 $stderr | ForEach-Object { Write-Host $_ } }
+    throw ("Run failed: dataset={0} mode={1} tag={2} (exit={3}). See: {4} / {5}" -f $dataset, $runMode, $runTag, $exitCode, $stdout, $stderr)
+  }
+  if ($exitCode -eq "unknown") {
+    Write-Host "[WARN] Process ExitCode is unknown. Check logs for details."
+    if (Test-Path $stderr) { Get-Content -Tail 120 $stderr | ForEach-Object { Write-Host $_ } }
+    throw ("Run failed: dataset={0} mode={1} tag={2} (exit=unknown). See: {3} / {4}" -f $dataset, $runMode, $runTag, $stdout, $stderr)
   }
 }
 
