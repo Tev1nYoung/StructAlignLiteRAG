@@ -60,12 +60,22 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
     $args += @("--llm_base_url", $LLMBaseUrl)
   }
 
+  $pythonExe = $null
+  if (-not [string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
+    $candidate = Join-Path $env:CONDA_PREFIX "python.exe"
+    if (Test-Path $candidate) { $pythonExe = $candidate }
+  }
+  if ($null -eq $pythonExe) {
+    $pythonExe = (Get-Command python -ErrorAction Stop).Source
+  }
+
   Write-Host ("[RUN] {0} | {1} | tag={2} | force_rebuild={3}" -f $dataset, $runMode, $runTag, $forceIndexFromScratch)
   Write-Host ("      stdout={0}" -f $stdout)
   Write-Host ("      stderr={0}" -f $stderr)
-  Write-Host ("      cmd=python {0}" -f ($args -join " "))
+  Write-Host ("      python_exe={0}" -f $pythonExe)
+  Write-Host ("      cmd={0} {1}" -f $pythonExe, ($args -join " "))
 
-  $p = Start-Process -FilePath "python" -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  $p = Start-Process -FilePath $pythonExe -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
   $p.WaitForExit()
   $exitCode = $p.ExitCode
   if ($null -eq $exitCode) { $exitCode = "unknown" }
