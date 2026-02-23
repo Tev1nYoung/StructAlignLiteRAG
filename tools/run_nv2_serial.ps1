@@ -17,68 +17,28 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Invoke-NativeLogged {
-  param(
-    [Parameter(Mandatory = $true)][string]$FilePath,
-    [Parameter(Mandatory = $true)][string[]]$ArgumentList,
-    [Parameter(Mandatory = $true)][string]$StdoutPath,
-    [Parameter(Mandatory = $true)][string]$StderrPath,
-    [switch]$Echo
-  )
-
-  $stdoutDir = Split-Path -Parent $StdoutPath
-  $stderrDir = Split-Path -Parent $StderrPath
-  if (-not [string]::IsNullOrWhiteSpace($stdoutDir)) { New-Item -ItemType Directory -Force -Path $stdoutDir | Out-Null }
-  if (-not [string]::IsNullOrWhiteSpace($stderrDir)) { New-Item -ItemType Directory -Force -Path $stderrDir | Out-Null }
-
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $FilePath
-  $psi.Arguments = ($ArgumentList | ForEach-Object { if ($_ -match "\\s") { '"' + $_.Replace('"', '\"') + '"' } else { $_ } }) -join " "
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.CreateNoWindow = $true
-
-  $proc = New-Object System.Diagnostics.Process
-  $proc.StartInfo = $psi
-
-  $stdoutWriter = New-Object System.IO.StreamWriter($StdoutPath, $true, [System.Text.Encoding]::UTF8)
-  $stderrWriter = New-Object System.IO.StreamWriter($StderrPath, $true, [System.Text.Encoding]::UTF8)
-  $stdoutWriter.AutoFlush = $true
-  $stderrWriter.AutoFlush = $true
-
-  $handlerOut = [System.Diagnostics.DataReceivedEventHandler]{
-    param($sender, $e)
-    if ($null -ne $e.Data) {
-      $stdoutWriter.WriteLine($e.Data)
-      if ($Echo) { Write-Host $e.Data }
-    }
+function Resolve-CondaExe {
+  # Prefer conda.exe (native) rather than PowerShell function/module wrapper.
+  if (-not [string]::IsNullOrWhiteSpace($env:CONDA_EXE) -and (Test-Path $env:CONDA_EXE)) {
+    return $env:CONDA_EXE
   }
-  $handlerErr = [System.Diagnostics.DataReceivedEventHandler]{
-    param($sender, $e)
-    if ($null -ne $e.Data) {
-      $stderrWriter.WriteLine($e.Data)
-      if ($Echo) { Write-Host $e.Data }
-    }
+  if (-not [string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
+    $cand = Join-Path $env:CONDA_PREFIX "Scripts\\conda.exe"
+    if (Test-Path $cand) { return $cand }
+    $cand = Join-Path $env:CONDA_PREFIX "condabin\\conda.bat"
+    if (Test-Path $cand) { return $cand }
   }
 
-  try {
-    if (-not $proc.Start()) {
-      throw "Failed to start process: $FilePath"
-    }
-    $proc.add_OutputDataReceived($handlerOut)
-    $proc.add_ErrorDataReceived($handlerErr)
-    $proc.BeginOutputReadLine()
-    $proc.BeginErrorReadLine()
-    $proc.WaitForExit()
-    return $proc.ExitCode
-  } finally {
-    try { $proc.CancelOutputRead() } catch {}
-    try { $proc.CancelErrorRead() } catch {}
-    try { $stdoutWriter.Close() } catch {}
-    try { $stderrWriter.Close() } catch {}
-    try { $proc.Dispose() } catch {}
+  $cmd = Get-Command conda.exe -ErrorAction SilentlyContinue
+  if ($null -ne $cmd -and -not [string]::IsNullOrWhiteSpace($cmd.Source) -and (Test-Path $cmd.Source)) {
+    return $cmd.Source
   }
+  $cmd = Get-Command conda.bat -ErrorAction SilentlyContinue
+  if ($null -ne $cmd -and -not [string]::IsNullOrWhiteSpace($cmd.Source) -and (Test-Path $cmd.Source)) {
+    return $cmd.Source
+  }
+
+  throw "Cannot locate conda executable (conda.exe/conda.bat)."
 }
 
 function Sanitize-ModelName([string]$name) {
@@ -180,27 +140,23 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
   Write-Host ("      stderr={0}" -f $stderr)
   Write-Host ("      conda_env={0} conda_prefix={1}" -f $envName, $condaPrefix)
   if ($useCondaRun) {
-    $condaExe = $env:CONDA_EXE
-    if ([string]::IsNullOrWhiteSpace($condaExe) -or -not (Test-Path $condaExe)) {
-      $condaCmd = Get-Command conda.exe -ErrorAction SilentlyContinue
-      if ($null -ne $condaCmd -and (Test-Path $condaCmd.Source)) {
-        $condaExe = $condaCmd.Source
-      }
-    }
-    if ([string]::IsNullOrWhiteSpace($condaExe) -or -not (Test-Path $condaExe)) {
-      throw "Cannot locate conda.exe. Ensure you have Anaconda/Miniconda installed and run this inside an activated conda prompt."
-    }
-
-    $condaArgList = @("run", "--no-capture-output", "-n", $envName, "python") + $args
+    $condaExe = Resolve-CondaExe
+    # Use python -u to force flush (helps real-time log writing).
+    $condaArgList = @("run", "--no-capture-output", "-n", $envName, "python", "-u") + $args
     Write-Host ("      mode=conda_run conda_exe={0}" -f $condaExe)
     Write-Host ("      cmd={0} {1}" -f $condaExe, ($condaArgList -join " "))
-    $exitCode = Invoke-NativeLogged -FilePath $condaExe -ArgumentList $condaArgList -StdoutPath $stdout -StderrPath $stderr -Echo
+    $p = Start-Process -FilePath $condaExe -ArgumentList $condaArgList -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $p.WaitForExit()
+    $exitCode = $p.ExitCode
   } else {
     Write-Host ("      mode=python_exe python_exe={0}" -f $pythonExe)
-    Write-Host ("      cmd={0} {1}" -f $pythonExe, ($args -join " "))
-    $exitCode = Invoke-NativeLogged -FilePath $pythonExe -ArgumentList $args -StdoutPath $stdout -StderrPath $stderr -Echo
+    Write-Host ("      cmd={0} -u {1}" -f $pythonExe, ($args -join " "))
+    $p = Start-Process -FilePath $pythonExe -ArgumentList @("-u") + $args -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $p.WaitForExit()
+    $exitCode = $p.ExitCode
   }
 
+  if ($null -eq $exitCode) { $exitCode = 0 }
   if ($exitCode -ne 0) {
     Write-Host ("[FAIL] exit={0} (showing last 120 lines of stderr)" -f $exitCode)
     if (Test-Path $stderr) { Get-Content -Tail 120 $stderr | ForEach-Object { Write-Host $_ } }
