@@ -50,9 +50,9 @@ python main.py --dataset hotpotqa         --run_mode rag_qa --embedding_name nvi
 python main.py --dataset musique         --run_mode rag_qa --embedding_name nvidia/NV-Embed-v2 --run_tag nv2_rag_qa --force_index_from_scratch false --offline_llm_workers 16 --online_qa_workers 8
 ```
 
-### NV2: serial runner (5 datasets)
+### NV2: serial runner (7 datasets)
 
-If you want a single command to run the full suite serially with NV2 on another machine (3 multi-hop + `nq_rear` + `popqa`), use:
+If you want a single command to run the full suite serially with NV2 on another machine (`sample` + `case_study_university` + 3 multi-hop + `nq_rear` + `popqa`), use:
 
 ```powershell
 conda activate hipporag
@@ -63,7 +63,7 @@ powershell -ExecutionPolicy Bypass -File tools\run_nv2_serial.ps1 -CleanOutputs 
 ```
 
 Useful flags:
-- `-Datasets @("2wikimultihopqa","hotpotqa","musique","nq_rear","popqa")` (override dataset list)
+- `-Datasets @("sample","case_study_university","2wikimultihopqa","hotpotqa","musique","nq_rear","popqa")` (override dataset list)
 - `-RetrievalOnly` (only run `retrieval_only` for all datasets)
 - `-SkipQA` (same as above; keep retrieval_only only)
 - `-Resume` (skip runs when the target predictions file already exists)

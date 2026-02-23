@@ -1,5 +1,5 @@
 param(
-  [string[]]$Datasets = @("2wikimultihopqa", "hotpotqa", "musique", "nq_rear", "popqa"),
+  [string[]]$Datasets = @("sample", "case_study_university", "2wikimultihopqa", "hotpotqa", "musique", "nq_rear", "popqa"),
   [string]$EmbeddingName = "nvidia/NV-Embed-v2",
   [string]$LLMName = "meta/llama-3.3-70b-instruct",
   [string]$LLMBaseUrl = "",
