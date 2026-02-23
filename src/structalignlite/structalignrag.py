@@ -1,0 +1,608 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Sequence, Set
+
+from tqdm import tqdm
+
+from .config import DEFAULT_LLM_BASE_URL, StructAlignRAGConfig
+from .embed.factory import build_embedder
+from .llm.openai_compat import CacheOpenAICompat, maybe_set_llm_key_from_file
+from .metrics.metrics import extra_metrics, qa_em_f1, retrieval_recall
+from .offline.indexer import OfflineIndexer
+from .online.generator import AnswerGenerator
+from .online.query_dag import build_query_dag
+from .online.retriever import StructAlignRetriever
+from .utils.logging_utils import get_logger
+from .utils.naming import sanitize_model_name
+
+logger = get_logger(__name__)
+
+
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def _move_file_if_needed(src: str, dst: str) -> bool:
+    """
+    Best-effort atomic move (rename) used for output-layout migration.
+    Returns True when a move happened.
+    """
+    if not os.path.exists(src):
+        return False
+    if os.path.exists(dst):
+        return False
+    _ensure_dir(os.path.dirname(dst))
+    try:
+        os.replace(src, dst)
+        return True
+    except OSError:
+        return False
+
+
+def _append_jsonl(path: str, row: Dict[str, Any]) -> None:
+    _ensure_dir(os.path.dirname(path))
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _append_hipporag_style_metrics(path: str, record: Dict[str, Any]) -> None:
+    _ensure_dir(os.path.dirname(path))
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, indent=2, ensure_ascii=False))
+        f.write("\n\n")
+
+
+def _maybe_rotate_legacy_metrics(path: str) -> None:
+    """
+    Early versions wrote a single-line JSON (flat keys). HippoRAG writes multi-line JSON objects.
+    If we detect legacy format, rename it to avoid mixing formats.
+    """
+    if not os.path.exists(path):
+        return
+    try:
+        first_non_empty = None
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                first_non_empty = line
+                break
+        if first_non_empty and first_non_empty.startswith("{") and "\"dataset\"" in first_non_empty and "\"time\"" in first_non_empty:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            new_path = path.replace(".jsonl", f".legacy_{ts}.jsonl")
+            os.replace(path, new_path)
+    except OSError:
+        return
+
+
+class StructAlignRAG:
+    def __init__(self, config: StructAlignRAGConfig) -> None:
+        self.config = config
+        self.run_tag = sanitize_model_name(str(config.run_tag)) if getattr(config, "run_tag", None) else None
+
+        llm_tag = sanitize_model_name(config.llm_name)
+        emb_tag = sanitize_model_name(config.embedding_model_name)
+        # Match HippoRAG/HARE style: <llm_tag>_<emb_tag>
+        self.meta_dir = os.path.join(config.save_dir(), f"{llm_tag}_{emb_tag}")
+
+        # Output layout (3 categories):
+        # - reusable: offline artifacts (index)
+        # - non_reusable: caches / volatile run state
+        # - metrics: predictions + metrics logs
+        self.reusable_dir = os.path.join(self.meta_dir, "reusable")
+        self.non_reusable_dir = os.path.join(self.meta_dir, "non_reusable")
+        self.metrics_dir = os.path.join(self.meta_dir, "metrics")
+        _ensure_dir(self.reusable_dir)
+        _ensure_dir(self.non_reusable_dir)
+        _ensure_dir(self.metrics_dir)
+
+        # One-time migration from legacy flat layout (files directly under meta_dir).
+        # This avoids expensive re-indexing when users upgrade.
+        self._maybe_migrate_legacy_outputs(llm_tag=llm_tag)
+
+        logger.info(
+            f"[StructAlignRAG] initialized | dataset={config.dataset} llm={config.llm_name} emb={config.embedding_model_name}"
+        )
+
+        # Models
+        self.embedder = build_embedder(
+            model_name=config.embedding_model_name,
+            batch_size=config.embedding_batch_size,
+            max_length=config.embedding_max_seq_len,
+            normalize=config.embedding_return_normalized,
+            dtype=config.embedding_dtype,
+        )
+
+        maybe_set_llm_key_from_file(config.llm_base_url, DEFAULT_LLM_BASE_URL)
+        if config.llm_base_url and "localhost" in config.llm_base_url and os.getenv("OPENAI_API_KEY") is None:
+            os.environ["OPENAI_API_KEY"] = "sk-"
+
+        cache_dir = os.path.join(self.non_reusable_dir, "llm_cache")
+        self.llm = CacheOpenAICompat(
+            cache_dir=cache_dir,
+            llm_name=config.llm_name,
+            llm_base_url=config.llm_base_url,
+            temperature=config.temperature,
+            max_new_tokens=config.max_new_tokens,
+            seed=config.seed,
+            max_retries=2,
+        )
+
+        # Pipeline parts
+        self.indexer = OfflineIndexer(config=config, meta_dir=self.reusable_dir)
+        self.retriever = StructAlignRetriever(config=config)
+        self.generator = AnswerGenerator(config=config, llm=self.llm)
+
+        # Outputs
+        self.metrics_log_path = os.path.join(self.metrics_dir, "metrics_log.jsonl")
+        self.metrics_run_dir = os.path.join(self.metrics_dir, "runs", self.run_tag) if self.run_tag else None
+        if self.metrics_run_dir:
+            _ensure_dir(self.metrics_run_dir)
+        self.pred_path = (
+            os.path.join(self.metrics_run_dir, "qa_predictions.json")
+            if self.metrics_run_dir
+            else os.path.join(self.metrics_dir, "qa_predictions.json")
+        )
+        self.metrics_log_path_run = (
+            os.path.join(self.metrics_run_dir, "metrics_log.jsonl") if self.metrics_run_dir else None
+        )
+
+    def _metrics_dir_for_run(self) -> str:
+        return self.metrics_run_dir or self.metrics_dir
+
+    def _maybe_migrate_legacy_outputs(self, llm_tag: str) -> None:
+        """
+        Migrate from legacy "flat" meta_dir layout to the 3-folder layout.
+
+        Legacy (pre-refactor):
+          meta_dir/<offline artifacts + qa_predictions.json + metrics_log.jsonl>
+          outputs/<dataset>/llm_cache/llm_cache_<llm>.sqlite
+
+        New:
+          meta_dir/reusable/<offline artifacts>
+          meta_dir/non_reusable/llm_cache/<llm cache sqlite>
+          meta_dir/metrics/<qa_predictions + metrics_log>
+        """
+        # 1) Offline artifacts -> reusable/
+        legacy_index_meta = os.path.join(self.meta_dir, "index_meta.json")
+        new_index_meta = os.path.join(self.reusable_dir, "index_meta.json")
+        offline_files = [
+            "docs.jsonl",
+            "passages.jsonl",
+            "entities.jsonl",
+            "capsules.jsonl",
+            "canonical_capsules.jsonl",
+            "capsule_to_canonical.jsonl",
+            "doc_embeddings.npy",
+            "passage_embeddings.npy",
+            "capsule_embeddings.npy",
+            "canonical_capsule_embeddings.npy",
+            "faiss_passages.index",
+            "faiss_passage_ids.json",
+            "faiss_capsules.index",
+            "faiss_capsule_ids.json",
+            "graph_edges.jsonl",
+            "graph_adj.pkl",
+            "struct_index.pkl",
+            "entity_alias_to_id.json",
+            "offline_stats.json",
+            "index_meta.json",
+        ]
+        if os.path.exists(legacy_index_meta) and (not os.path.exists(new_index_meta)):
+            moved = 0
+            for fn in offline_files:
+                src = os.path.join(self.meta_dir, fn)
+                dst = os.path.join(self.reusable_dir, fn)
+                if _move_file_if_needed(src, dst):
+                    moved += 1
+            if moved:
+                logger.info(f"[StructAlignRAG] migrated legacy offline artifacts -> reusable/ | moved_files={moved}")
+
+        # 2) QA outputs -> metrics/
+        for fn in ["metrics_log.jsonl", "qa_predictions.json"]:
+            src = os.path.join(self.meta_dir, fn)
+            dst = os.path.join(self.metrics_dir, fn)
+            if _move_file_if_needed(src, dst):
+                logger.info(f"[StructAlignRAG] migrated legacy QA output -> metrics/ | file={fn}")
+
+        # 3) LLM cache -> non_reusable/llm_cache/
+        legacy_cache_dir = os.path.join(self.config.save_dir(), "llm_cache")
+        legacy_cache_file = os.path.join(legacy_cache_dir, f"llm_cache_{self.config.llm_name.replace('/', '_')}.sqlite")
+        legacy_lock_file = legacy_cache_file + ".lock"
+        new_cache_dir = os.path.join(self.non_reusable_dir, "llm_cache")
+        new_cache_file = os.path.join(new_cache_dir, os.path.basename(legacy_cache_file))
+        new_lock_file = new_cache_file + ".lock"
+
+        if _move_file_if_needed(legacy_cache_file, new_cache_file):
+            logger.info(f"[StructAlignRAG] migrated legacy llm_cache sqlite -> non_reusable/llm_cache/ | llm={llm_tag}")
+        _move_file_if_needed(legacy_lock_file, new_lock_file)
+
+        # Optional: cleanup empty legacy cache dir (best effort).
+        try:
+            if os.path.isdir(legacy_cache_dir) and not os.listdir(legacy_cache_dir):
+                os.rmdir(legacy_cache_dir)
+        except OSError:
+            pass
+
+    def index(self, corpus: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return self.indexer.build_or_load(corpus=corpus, embedder=self.embedder, llm=self.llm)
+
+    def rag_qa(
+        self,
+        queries: Sequence[str],
+        gold_docs: Optional[Sequence[Sequence[str]]],
+        gold_answers: Sequence[Set[str]],
+        qids: Optional[Sequence[str]] = None,
+        run_timing_s: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        t_qa0 = time.time()
+        index = self.indexer.load_index()
+
+        if qids is None:
+            qids = [str(i) for i in range(len(queries))]
+
+        n = len(queries)
+        preds: List[Optional[Dict[str, Any]]] = [None for _ in range(n)]
+        predicted_answers: List[Optional[str]] = [None for _ in range(n)]
+        retrieved_docs_all: List[Optional[List[str]]] = [None for _ in range(n)]
+        subq_cov_list: List[float] = [0.0 for _ in range(n)]
+        ev_tokens_list: List[int] = [0 for _ in range(n)]
+        latency_list: List[float] = [0.0 for _ in range(n)]
+
+        # Online parallelism:
+        # - We parallelize per-query (I/O bound on LLM).
+        # - Embedding calls are serialized inside the embedder (thread-safe lock),
+        #   so this does not change retrieval logic or introduce nondeterminism from concurrent GPU calls.
+        workers = int(getattr(self.config, "online_qa_workers", 0) or 0)
+        if workers <= 0:
+            # Conservative auto: use up to num_keys, but cap to 8 to avoid 429 storms on some providers.
+            try:
+                workers = min(8, max(1, int(getattr(self.llm, "num_keys")() or 1)))
+            except Exception:
+                workers = 1
+
+        logger.info(f"[StructAlignRAG] [RAG_QA] start | num_queries={n} workers={workers}")
+
+        def _run_one(i: int, qid: str, q: str) -> Dict[str, Any]:
+            qt0 = time.time()
+            logger.info(f"[StructAlignRAG] [Step 1-5] query start | qid={qid} | {q}")
+
+            dag = build_query_dag(q, llm=self.llm, config=self.config)
+            rr = self.retriever.retrieve(question=q, query_dag=dag, index=index, embedder=self.embedder, llm=self.llm)
+            ans, gen_meta = self.generator.answer(question=q, passages=rr.selected_passages)
+
+            return {
+                "i": i,
+                "qid": qid,
+                "question": q,
+                "answer": ans,
+                "query_dag": dag,
+                "selected_passages": [{"doc_idx": p.get("doc_idx"), "title": p.get("title")} for p in rr.selected_passages],
+                "retrieved_docs": rr.retrieved_docs,
+                "debug": rr.debug,
+                "gen_meta": gen_meta,
+                "latency_s": float(time.time() - qt0),
+            }
+
+        if workers <= 1 or n <= 1:
+            pbar = tqdm(total=n, desc="RAG_QA", disable=False, ascii=True, dynamic_ncols=True)
+            for i, (qid, q) in enumerate(zip(qids, queries)):
+                out = _run_one(i=i, qid=qid, q=q)
+                predicted_answers[i] = out["answer"]
+                retrieved_docs_all[i] = list(out["retrieved_docs"] or [])
+                subq_cov_list[i] = float((out.get("debug") or {}).get("subq_coverage", 0.0))
+                ev_tokens_list[i] = int((out.get("debug") or {}).get("evidence_tokens", 0))
+                latency_list[i] = float(out.get("latency_s", 0.0))
+                preds[i] = {
+                    "qid": out["qid"],
+                    "question": out["question"],
+                    "answer": out["answer"],
+                    "query_dag": out["query_dag"],
+                    "selected_passages": out["selected_passages"],
+                    "retrieved_docs_top5": (out["retrieved_docs"] or [])[:5],
+                    "debug": out.get("debug") or {},
+                    "gen_meta": out.get("gen_meta") or {},
+                }
+                pbar.update(1)
+            pbar.close()
+        else:
+            pbar = tqdm(total=n, desc="RAG_QA", disable=False, ascii=True, dynamic_ncols=True)
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {
+                    ex.submit(_run_one, i, qid, q): i
+                    for i, (qid, q) in enumerate(zip(qids, queries))
+                }
+                for fut in as_completed(futs):
+                    out = fut.result()
+                    i = int(out["i"])
+                    predicted_answers[i] = out["answer"]
+                    retrieved_docs_all[i] = list(out["retrieved_docs"] or [])
+                    subq_cov_list[i] = float((out.get("debug") or {}).get("subq_coverage", 0.0))
+                    ev_tokens_list[i] = int((out.get("debug") or {}).get("evidence_tokens", 0))
+                    latency_list[i] = float(out.get("latency_s", 0.0))
+                    preds[i] = {
+                        "qid": out["qid"],
+                        "question": out["question"],
+                        "answer": out["answer"],
+                        "query_dag": out["query_dag"],
+                        "selected_passages": out["selected_passages"],
+                        "retrieved_docs_top5": (out["retrieved_docs"] or [])[:5],
+                        "debug": out.get("debug") or {},
+                        "gen_meta": out.get("gen_meta") or {},
+                    }
+                    pbar.update(1)
+            pbar.close()
+
+        # Tight sanity: ensure ordering arrays are filled.
+        predicted_answers_f: List[str] = [str(a or "") for a in predicted_answers]
+        retrieved_docs_all_f: List[List[str]] = [list(x or []) for x in retrieved_docs_all]
+        preds_f: List[Dict[str, Any]] = [p or {"qid": qids[i], "question": str(queries[i]), "answer": ""} for i, p in enumerate(preds)]
+
+        with open(self.pred_path, "w", encoding="utf-8") as f:
+            json.dump(preds_f, f, ensure_ascii=False, indent=2)
+        logger.info(f"[StructAlignRAG] [RAG_QA] predictions written | {self.pred_path}")
+
+        # Metrics
+        qa_metrics = qa_em_f1(gold_answers=gold_answers, predicted_answers=predicted_answers_f)
+        retrieval_metrics = retrieval_recall(
+            gold_docs=gold_docs,
+            retrieved_docs=retrieved_docs_all_f,
+            k_list=[1, 2, 5, 10, 20, 30, 50, 100, 150, 200],
+        )
+        extra = extra_metrics(subq_coverages=subq_cov_list, evidence_tokens=ev_tokens_list, latencies_s=latency_list)
+
+        # Attach end-to-end run timing (measured in main) into the metrics record.
+        # This avoids a separate runtime log file and keeps HippoRAG-style per-run metadata together.
+        run_timing: Dict[str, float] = {}
+        if isinstance(run_timing_s, dict):
+            for k, v in run_timing_s.items():
+                try:
+                    run_timing[str(k)] = float(v)
+                except Exception:
+                    continue
+        run_timing["rag_qa"] = float(time.time() - t_qa0)
+        if ("init" in run_timing) and ("index" in run_timing):
+            run_timing["total"] = float(run_timing.get("init", 0.0) + run_timing.get("index", 0.0) + run_timing["rag_qa"])
+        # Keep a flattened view in extra_metrics for easy scanning.
+        extra = dict(extra or {})
+        extra["RunQAS"] = round(run_timing["rag_qa"], 4)
+        if "init" in run_timing:
+            extra["RunInitS"] = round(run_timing["init"], 4)
+        if "index" in run_timing:
+            extra["RunIndexS"] = round(run_timing["index"], 4)
+        if "total" in run_timing:
+            extra["RunTotalS"] = round(run_timing["total"], 4)
+
+        metrics: Dict[str, Any] = {}
+        metrics.update(qa_metrics)
+        metrics.update(retrieval_metrics)
+        metrics.update(extra)
+
+        record = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "run_mode": "rag_qa",
+            "run_tag": self.run_tag,
+            "dataset": self.config.dataset,
+            "num_queries": len(queries),
+            "llm_name": self.config.llm_name,
+            "llm_base_url": self.config.llm_base_url,
+            "embedding_model_name": self.config.embedding_model_name,
+            "embedding_base_url": None,
+            "openie_mode": None,
+            "graph_type": f"structalign_capsule_{self.config.capsule_mode}",
+            "retrieval_top_k": self.config.retrieval_top_k,
+            "qa_top_k": self.config.qa_top_k_passages,
+            "rerank_dspy_file_path": None,
+            "retrieval_metrics": retrieval_metrics if retrieval_metrics else None,
+            "qa_metrics": qa_metrics,
+            "extra_metrics": extra,
+            "run_timing_s": {k: round(v, 4) for k, v in run_timing.items()} if run_timing else None,
+        }
+
+        # For reproducibility: store the exact CLI used for this run.
+        # Use Windows-friendly quoting so the command can be copy-pasted.
+        try:
+            exe = str(sys.executable or "python")
+            argv = [str(x) for x in (sys.argv or [])]
+            record["cli"] = {
+                "executable": exe,
+                "argv": argv,
+                "cwd": os.getcwd(),
+                "command": subprocess.list2cmdline([exe] + argv),
+            }
+        except Exception:
+            record["cli"] = {"executable": None, "argv": None, "cwd": None, "command": None}
+
+        _maybe_rotate_legacy_metrics(self.metrics_log_path)
+        _append_hipporag_style_metrics(self.metrics_log_path, record)
+        if self.metrics_log_path_run:
+            _maybe_rotate_legacy_metrics(self.metrics_log_path_run)
+            _append_hipporag_style_metrics(self.metrics_log_path_run, record)
+        logger.info(f"[StructAlignRAG] [Metrics] appended metrics log | {self.metrics_log_path}")
+
+        logger.info(
+            f"[StructAlignRAG] [RAG_QA] done | EM={qa_metrics.get('ExactMatch')} F1={qa_metrics.get('F1')} "
+            f"R@5={(retrieval_metrics or {}).get('Recall@5')} SubQCoverage={extra.get('SubQCoverage')}"
+        )
+        return metrics
+
+    def retrieval_only(
+        self,
+        queries: Sequence[str],
+        gold_docs: Optional[Sequence[Sequence[str]]],
+        qids: Optional[Sequence[str]] = None,
+        run_timing_s: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Retrieval-only run: computes Recall@k (and extra retrieval diagnostics) without answer generation.
+
+        This is designed for fast ablations of online retrieval modules without spending LLM budget on QA.
+        """
+        t_qa0 = time.time()
+        index = self.indexer.load_index()
+
+        if qids is None:
+            qids = [str(i) for i in range(len(queries))]
+
+        n = len(queries)
+        preds: List[Optional[Dict[str, Any]]] = [None for _ in range(n)]
+        retrieved_docs_all: List[Optional[List[str]]] = [None for _ in range(n)]
+        subq_cov_list: List[float] = [0.0 for _ in range(n)]
+        ev_tokens_list: List[int] = [0 for _ in range(n)]
+        latency_list: List[float] = [0.0 for _ in range(n)]
+
+        workers = int(getattr(self.config, "online_qa_workers", 0) or 0)
+        if workers <= 0:
+            try:
+                workers = min(8, max(1, int(getattr(self.llm, "num_keys")() or 1)))
+            except Exception:
+                workers = 1
+
+        logger.info(f"[StructAlignRAG] [RETRIEVAL_ONLY] start | num_queries={n} workers={workers}")
+
+        def _run_one(i: int, qid: str, q: str) -> Dict[str, Any]:
+            qt0 = time.time()
+            logger.info(f"[StructAlignRAG] [Step 1-4] query start | qid={qid} | {q}")
+
+            dag = build_query_dag(q, llm=self.llm, config=self.config)
+            rr = self.retriever.retrieve(question=q, query_dag=dag, index=index, embedder=self.embedder, llm=self.llm)
+
+            return {
+                "i": i,
+                "qid": qid,
+                "question": q,
+                "query_dag": dag,
+                "selected_passages": [{"doc_idx": p.get("doc_idx"), "title": p.get("title")} for p in rr.selected_passages],
+                "retrieved_docs": rr.retrieved_docs,
+                "debug": rr.debug,
+                "latency_s": float(time.time() - qt0),
+            }
+
+        if workers <= 1 or n <= 1:
+            pbar = tqdm(total=n, desc="RETRIEVAL_ONLY", disable=False, ascii=True, dynamic_ncols=True)
+            for i, (qid, q) in enumerate(zip(qids, queries)):
+                out = _run_one(i=i, qid=qid, q=q)
+                retrieved_docs_all[i] = list(out["retrieved_docs"] or [])
+                subq_cov_list[i] = float((out.get("debug") or {}).get("subq_coverage", 0.0))
+                ev_tokens_list[i] = int((out.get("debug") or {}).get("evidence_tokens", 0))
+                latency_list[i] = float(out.get("latency_s", 0.0))
+                preds[i] = {
+                    "qid": out["qid"],
+                    "question": out["question"],
+                    "query_dag": out["query_dag"],
+                    "selected_passages": out["selected_passages"],
+                    "retrieved_docs_top5": (out["retrieved_docs"] or [])[:5],
+                    "debug": out.get("debug") or {},
+                }
+                pbar.update(1)
+            pbar.close()
+        else:
+            pbar = tqdm(total=n, desc="RETRIEVAL_ONLY", disable=False, ascii=True, dynamic_ncols=True)
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {ex.submit(_run_one, i, qid, q): i for i, (qid, q) in enumerate(zip(qids, queries))}
+                for fut in as_completed(futs):
+                    out = fut.result()
+                    i = int(out["i"])
+                    retrieved_docs_all[i] = list(out["retrieved_docs"] or [])
+                    subq_cov_list[i] = float((out.get("debug") or {}).get("subq_coverage", 0.0))
+                    ev_tokens_list[i] = int((out.get("debug") or {}).get("evidence_tokens", 0))
+                    latency_list[i] = float(out.get("latency_s", 0.0))
+                    preds[i] = {
+                        "qid": out["qid"],
+                        "question": out["question"],
+                        "query_dag": out["query_dag"],
+                        "selected_passages": out["selected_passages"],
+                        "retrieved_docs_top5": (out["retrieved_docs"] or [])[:5],
+                        "debug": out.get("debug") or {},
+                    }
+                    pbar.update(1)
+            pbar.close()
+
+        retrieved_docs_all_f: List[List[str]] = [list(x or []) for x in retrieved_docs_all]
+        preds_f: List[Dict[str, Any]] = [p or {"qid": qids[i], "question": str(queries[i])} for i, p in enumerate(preds)]
+
+        pred_path = os.path.join(self._metrics_dir_for_run(), "retrieval_predictions.json")
+        with open(pred_path, "w", encoding="utf-8") as f:
+            json.dump(preds_f, f, ensure_ascii=False, indent=2)
+        logger.info(f"[StructAlignRAG] [RETRIEVAL_ONLY] predictions written | {pred_path}")
+
+        retrieval_metrics = retrieval_recall(
+            gold_docs=gold_docs,
+            retrieved_docs=retrieved_docs_all_f,
+            k_list=[1, 2, 5, 10, 20, 30, 50, 100, 150, 200],
+        )
+        extra = extra_metrics(subq_coverages=subq_cov_list, evidence_tokens=ev_tokens_list, latencies_s=latency_list)
+
+        run_timing: Dict[str, float] = {}
+        if isinstance(run_timing_s, dict):
+            for k, v in run_timing_s.items():
+                try:
+                    run_timing[str(k)] = float(v)
+                except Exception:
+                    continue
+        run_timing["retrieval_only"] = float(time.time() - t_qa0)
+        if ("init" in run_timing) and ("index" in run_timing):
+            run_timing["total"] = float(run_timing.get("init", 0.0) + run_timing.get("index", 0.0) + run_timing["retrieval_only"])
+        extra = dict(extra or {})
+        extra["RunRetrievalOnlyS"] = round(run_timing["retrieval_only"], 4)
+        if "init" in run_timing:
+            extra["RunInitS"] = round(run_timing["init"], 4)
+        if "index" in run_timing:
+            extra["RunIndexS"] = round(run_timing["index"], 4)
+        if "total" in run_timing:
+            extra["RunTotalS"] = round(run_timing["total"], 4)
+
+        record = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "run_mode": "retrieval_only",
+            "run_tag": self.run_tag,
+            "dataset": self.config.dataset,
+            "num_queries": len(queries),
+            "llm_name": self.config.llm_name,
+            "llm_base_url": self.config.llm_base_url,
+            "embedding_model_name": self.config.embedding_model_name,
+            "embedding_base_url": None,
+            "openie_mode": None,
+            "graph_type": f"structalign_capsule_{self.config.capsule_mode}",
+            "retrieval_top_k": self.config.retrieval_top_k,
+            "qa_top_k": self.config.qa_top_k_passages,
+            "rerank_dspy_file_path": None,
+            "retrieval_metrics": retrieval_metrics if retrieval_metrics else None,
+            "qa_metrics": None,
+            "extra_metrics": extra,
+            "run_timing_s": {k: round(v, 4) for k, v in run_timing.items()} if run_timing else None,
+        }
+
+        try:
+            exe = str(sys.executable or "python")
+            argv = [str(x) for x in (sys.argv or [])]
+            record["cli"] = {
+                "executable": exe,
+                "argv": argv,
+                "cwd": os.getcwd(),
+                "command": subprocess.list2cmdline([exe] + argv),
+            }
+        except Exception:
+            record["cli"] = {"executable": None, "argv": None, "cwd": None, "command": None}
+
+        _maybe_rotate_legacy_metrics(self.metrics_log_path)
+        _append_hipporag_style_metrics(self.metrics_log_path, record)
+        if self.metrics_log_path_run:
+            _maybe_rotate_legacy_metrics(self.metrics_log_path_run)
+            _append_hipporag_style_metrics(self.metrics_log_path_run, record)
+        logger.info(f"[StructAlignRAG] [Metrics] appended metrics log | {self.metrics_log_path}")
+
+        logger.info(
+            f"[StructAlignRAG] [RETRIEVAL_ONLY] done | R@5={(retrieval_metrics or {}).get('Recall@5')} "
+            f"SubQCoverage={extra.get('SubQCoverage')}"
+        )
+        return {"retrieval_metrics": retrieval_metrics, "extra_metrics": extra}

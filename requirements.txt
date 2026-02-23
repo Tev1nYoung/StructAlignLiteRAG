@@ -1,0 +1,14 @@
+# Minimal runtime dependencies (tested via `conda activate hipporag`).
+# On Windows, FAISS is best installed via conda (e.g., `conda install -c conda-forge faiss-cpu`).
+openai
+httpx
+filelock
+tenacity
+packaging
+
+numpy
+tqdm
+
+torch
+transformers
+
