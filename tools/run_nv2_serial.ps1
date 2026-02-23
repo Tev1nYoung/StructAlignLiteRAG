@@ -122,25 +122,25 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
     $condaArgList = @("run", "-n", $envName, "python") + $args
     Write-Host ("      mode=conda_run conda_exe={0}" -f $condaExe)
     Write-Host ("      cmd={0} {1}" -f $condaExe, ($condaArgList -join " "))
-    $p = Start-Process -FilePath $condaExe -ArgumentList $condaArgList -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    & $condaExe @condaArgList 1> $stdout 2> $stderr
+    $exitCode = $LASTEXITCODE
   } else {
     Write-Host ("      mode=python_exe python_exe={0}" -f $pythonExe)
     Write-Host ("      cmd={0} {1}" -f $pythonExe, ($args -join " "))
-    $p = Start-Process -FilePath $pythonExe -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    & $pythonExe @args 1> $stdout 2> $stderr
+    $exitCode = $LASTEXITCODE
   }
 
-  $p.WaitForExit()
-  $exitCode = $p.ExitCode
-  if ($null -eq $exitCode) { $exitCode = "unknown" }
-  if ($exitCode -ne 0 -and $exitCode -ne "unknown") {
+  if ($exitCode -ne 0) {
     Write-Host ("[FAIL] exit={0} (showing last 120 lines of stderr)" -f $exitCode)
     if (Test-Path $stderr) { Get-Content -Tail 120 $stderr | ForEach-Object { Write-Host $_ } }
     throw ("Run failed: dataset={0} mode={1} tag={2} (exit={3}). See: {4} / {5}" -f $dataset, $runMode, $runTag, $exitCode, $stdout, $stderr)
   }
-  if ($exitCode -eq "unknown") {
-    Write-Host "[WARN] Process ExitCode is unknown. Check logs for details."
-    if (Test-Path $stderr) { Get-Content -Tail 120 $stderr | ForEach-Object { Write-Host $_ } }
-    throw ("Run failed: dataset={0} mode={1} tag={2} (exit=unknown). See: {3} / {4}" -f $dataset, $runMode, $runTag, $stdout, $stderr)
+
+  if (-not (Test-Path $predPath)) {
+    Write-Host "[FAIL] run finished but predictions file not found (showing last 80 lines of stderr)"
+    if (Test-Path $stderr) { Get-Content -Tail 80 $stderr | ForEach-Object { Write-Host $_ } }
+    throw ("Run finished but predictions missing: {0}" -f $predPath)
   }
 }
 
