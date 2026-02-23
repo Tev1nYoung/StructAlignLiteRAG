@@ -64,6 +64,7 @@ powershell -ExecutionPolicy Bypass -File tools\run_nv2_serial.ps1 -CleanOutputs 
 
 Useful flags:
 - `-Datasets @("sample","case_study_university","2wikimultihopqa","hotpotqa","musique","nq_rear","popqa")` (override dataset list)
+- `-EmbeddingBatchSize 8` (default is 8; reduce if you hit GPU OOM)
 - `-RetrievalOnly` (only run `retrieval_only` for all datasets; useful as a cheap gate)
 - `-SkipQA` (same as above)
 - `-Resume` (skip runs when the target predictions file already exists)

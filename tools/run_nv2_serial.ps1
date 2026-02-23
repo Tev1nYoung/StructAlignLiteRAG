@@ -4,6 +4,7 @@ param(
   [string]$LLMName = "meta/llama-3.3-70b-instruct",
   [string]$LLMBaseUrl = "",
   [string]$SaveRoot = "outputs",
+  [int]$EmbeddingBatchSize = 8,
   [int]$OfflineLLMWorkers = 16,
   [int]$OnlineQAWorkers = 8,
   [string]$CondaEnvName = "",
@@ -77,6 +78,7 @@ function Run-One([string]$dataset, [string]$runMode, [string]$runTag, [bool]$for
     "--save_root", $SaveRoot,
     "--run_tag", $runTag,
     "--force_index_from_scratch", ($(if ($forceIndexFromScratch) { "true" } else { "false" })),
+    "--embedding_batch_size", $EmbeddingBatchSize,
     "--offline_llm_workers", $OfflineLLMWorkers,
     "--online_qa_workers", $OnlineQAWorkers
   )
